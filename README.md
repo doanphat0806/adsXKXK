@@ -28,7 +28,21 @@ MONGO_URI=mongodb://localhost:27017/fb_ads_manager
 MONGO_URI=mongodb+srv://user:password@cluster.mongodb.net/fb_ads_manager
 
 PORT=3000
+
+# Redis queue (BullMQ)
+REDIS_URL=redis://127.0.0.1:6379
+CAMPAIGN_DUPLICATE_QUEUE_CONCURRENCY=1
+CAMPAIGN_DUPLICATE_JOB_ATTEMPTS=1
+CAMPAIGN_SYNC_QUEUE_CONCURRENCY=1
+CAMPAIGN_SYNC_JOB_ATTEMPTS=1
+CAMPAIGN_SYNC_DAY_DELAY_MS=300
 ```
+
+When Redis is enabled, `POST /api/campaigns/duplicate-exact` returns `202` with a `jobId`.
+Check progress at `GET /api/queues/campaign-duplicates/jobs/:id`.
+Send `"queue": false` in the request body to run the old inline behavior.
+Campaign spend sync also uses BullMQ: `POST /api/campaigns/sync-history` returns a `jobId`,
+and progress is available at `GET /api/campaigns/sync-history/:jobId`.
 
 ## Chạy
 

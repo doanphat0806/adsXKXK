@@ -5,10 +5,11 @@ export default function AuthScreen() {
   const { login } = useAppContext();
   const [user, setUser] = useState('');
   const [pass, setPass] = useState('');
+  const [provider, setProvider] = useState('facebook');
 
   const handleLogin = (e) => {
     e.preventDefault();
-    login(user, pass);
+    login(user, pass, provider);
   };
 
   return (
@@ -16,7 +17,14 @@ export default function AuthScreen() {
       <div className="auth-card">
         <h1>Đăng nhập quản trị</h1>
         <form onSubmit={handleLogin}>
-          <div className="form-grid" style={{ gridTemplateColumns: '1fr' }}>
+          <div className="form-grid auth-form-grid">
+            <div className="form-group full">
+              <label>Nền tảng</label>
+              <select value={provider} onChange={(e) => setProvider(e.target.value)}>
+                <option value="facebook">Facebook</option>
+                <option value="shopee">Shopee</option>
+              </select>
+            </div>
             <div className="form-group full">
               <label>Tài khoản</label>
               <input 
@@ -36,8 +44,8 @@ export default function AuthScreen() {
               />
             </div>
           </div>
-          <div className="form-actions" style={{ justifyContent: 'stretch' }}>
-            <button type="submit" className="btn btn-g" style={{ width: '100%', justifyContent: 'center' }}>
+          <div className="form-actions auth-form-actions">
+            <button type="submit" className="btn btn-g">
               Đăng nhập
             </button>
           </div>

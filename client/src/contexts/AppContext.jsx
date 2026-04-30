@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import { api, todayString } from '../lib/api';
+import { api, cachedApi, readResponseCache, todayString } from '../lib/api';
 import { toast } from 'react-toastify';
 
 const AppContext = createContext();
@@ -10,6 +10,7 @@ const AUTO_REFRESH_MS = 60000;
 
 export const AppProvider = ({ children }) => {
   const [isAuthenticated, setIsAuthenticated] = useState(() => localStorage.getItem('adsctrl-auth') === '1');
+  const [provider, setProvider] = useState(() => localStorage.getItem('adsctrl-provider') || 'facebook');
   const [appConfig, setAppConfig] = useState({});
   const [stats, setStats] = useState({});
   const [allAccounts, setAllAccounts] = useState([]);
@@ -22,20 +23,48 @@ export const AppProvider = ({ children }) => {
   const openModal = (type, data = null) => setModalState({ type, data });
   const closeModal = () => setModalState({ type: null, data: null });
 
-  const login = async (username, password) => {
+  const loginFacebook = async (username, password) => {
     if (username === 'admin' && password === 'admin') {
       localStorage.setItem('adsctrl-auth', '1');
+      localStorage.setItem('adsctrl-provider', 'facebook');
       setIsAuthenticated(true);
-      toast.success('Đăng nhập thành công');
+      setProvider('facebook');
+      toast.success('Đăng nhập Facebook thành công');
       return true;
     }
-    toast.error('Sai tài khoản hoặc mật khẩu');
+    toast.error('Sai tài khoản hoặc mật khẩu Facebook');
+    return false;
+  };
+
+  const loginShopee = async (username, password) => {
+    if (username === 'admin1' && password === 'admin') {
+      localStorage.setItem('adsctrl-auth', '1');
+      localStorage.setItem('adsctrl-provider', 'shopee');
+      setIsAuthenticated(true);
+      setProvider('shopee');
+      toast.success('Đăng nhập Shopee thành công');
+      return true;
+    }
+    toast.error('Sai tài khoản hoặc mật khẩu Shopee');
+    return false;
+  };
+
+  const login = async (username, password, type = 'facebook') => {
+    if (type === 'facebook') {
+      return loginFacebook(username, password);
+    }
+    if (type === 'shopee') {
+      return loginShopee(username, password);
+    }
+    toast.error('Nhà cung cấp không hợp lệ');
     return false;
   };
 
   const logout = () => {
     localStorage.removeItem('adsctrl-auth');
+    localStorage.removeItem('adsctrl-provider');
     setIsAuthenticated(false);
+    setProvider('facebook');
   };
 
   const loadConfig = useCallback(async () => {
@@ -49,24 +78,30 @@ export const AppProvider = ({ children }) => {
 
   const loadStats = useCallback(async () => {
     try {
-      const data = await api('GET', '/stats');
+      const url = `/stats?provider=${provider}`;
+      const cached = readResponseCache(`GET:${url}`);
+      if (cached) setStats(cached);
+      const data = await cachedApi('GET', url);
       setStats(data);
     } catch (e) {}
-  }, []);
+  }, [provider]);
 
   const loadAccounts = useCallback(async () => {
     try {
-      const data = await api('GET', '/accounts');
+      const data = await api('GET', `/accounts?provider=${provider}`);
       setAllAccounts(data);
     } catch (e) {}
-  }, []);
+  }, [provider]);
 
   const loadTodayCampaigns = useCallback(async () => {
     try {
-      const data = await api('GET', '/campaigns/today');
+      const url = `/campaigns/today?provider=${provider}`;
+      const cached = readResponseCache(`GET:${url}`);
+      if (cached) setAllTodayCampaigns(cached);
+      const data = await cachedApi('GET', url, null, { timeoutMs: 5 * 60 * 1000 });
       setAllTodayCampaigns(data);
     } catch (e) {}
-  }, []);
+  }, [provider]);
 
   const loadTodayOrderSkuCounts = useCallback(async () => {
     try {
@@ -86,14 +121,16 @@ export const AppProvider = ({ children }) => {
         loadStats(),
         loadAccounts(),
         loadTodayCampaigns(),
-        loadTodayOrderSkuCounts(),
         includeConfig ? loadConfig() : Promise.resolve()
       ]);
+      if (provider !== 'shopee') {
+        loadTodayOrderSkuCounts();
+      }
     } finally {
       liveLoadInFlight.current = false;
       if (showLoading) setLoading(false);
     }
-  }, [loadStats, loadAccounts, loadTodayCampaigns, loadTodayOrderSkuCounts, loadConfig]);
+  }, [loadStats, loadAccounts, loadTodayCampaigns, loadTodayOrderSkuCounts, loadConfig, provider]);
 
   const loadAll = useCallback(async () => {
     await loadLiveData({ includeConfig: true, showLoading: true });
@@ -138,7 +175,7 @@ export const AppProvider = ({ children }) => {
 
   return (
     <AppContext.Provider value={{
-      isAuthenticated, login, logout,
+      provider, isAuthenticated, login, logout,
       appConfig, setAppConfig, loadConfig,
       stats, allAccounts, allTodayCampaigns, todayOrderSkuCounts,
       loading, loadAll, refreshAll, loadAccounts, loadTodayCampaigns, loadTodayOrderSkuCounts,

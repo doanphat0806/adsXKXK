@@ -4,6 +4,7 @@ import AccountModal from './Modals/AccountModal';
 import AutomationModal from './Modals/AutomationModal';
 import ConfigModal from './Modals/ConfigModal';
 import BulkAddModal from './Modals/BulkAddModal';
+import ShopeePagesModal from './Modals/ShopeePagesModal';
 
 export default function ModalContainer() {
   const { modalState, closeModal } = useAppContext();
@@ -20,6 +21,8 @@ export default function ModalContainer() {
         return <ConfigModal />;
       case 'BULK_ADD':
         return <BulkAddModal />;
+      case 'SHOPEE_PAGES':
+        return <ShopeePagesModal />;
       default:
         return null;
     }

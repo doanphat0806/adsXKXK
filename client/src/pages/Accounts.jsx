@@ -1,10 +1,32 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useAppContext } from '../contexts/AppContext';
 import { api, formatVND, formatNumber, timeString } from '../lib/api';
 import { toast } from 'react-toastify';
 
+function getDisplayStatus(account, stats) {
+  const hasTodayData = (stats.spend || 0) > 0 || (stats.msgs || 0) > 0 || (stats.active || 0) > 0;
+
+  if (account.status === 'error' && hasTodayData) {
+    return {
+      className: 'warning',
+      label: 'Có dữ liệu',
+      title: 'Backend vẫn báo lỗi ở một bước đồng bộ, nhưng hôm nay đã có dữ liệu campaign.'
+    };
+  }
+
+  if (account.status === 'connected') {
+    return { className: 'connected', label: 'Online', title: 'Đồng bộ thành công' };
+  }
+
+  if (account.status === 'error') {
+    return { className: 'error', label: 'Lỗi', title: 'Đồng bộ lỗi, xem Nhật ký để biết chi tiết' };
+  }
+
+  return { className: 'disconnected', label: 'Offline', title: 'Chưa kết nối' };
+}
+
 export default function Accounts() {
-  const { allAccounts, allTodayCampaigns, loadAccounts, openModal } = useAppContext();
+  const { provider, allAccounts, allTodayCampaigns, loadAccounts, openModal } = useAppContext();
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedAccounts, setSelectedAccounts] = useState(new Set());
 
@@ -15,6 +37,15 @@ export default function Accounts() {
       acc.name.toLowerCase().includes(term)
     );
   }, [allAccounts, searchTerm]);
+
+  const currentAccountIds = useMemo(() => new Set(allAccounts.map(account => account._id)), [allAccounts]);
+
+  useEffect(() => {
+    setSelectedAccounts(prev => {
+      const next = new Set([...prev].filter(id => currentAccountIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [currentAccountIds]);
 
   const campaignStatsByAccount = useMemo(() => {
     const statsMap = new Map();
@@ -49,20 +80,21 @@ export default function Accounts() {
     try {
       await api('POST', `/accounts/${id}/auto`, { enabled });
       toast.success(`Đã ${enabled ? 'bật' : 'tắt'} tự động cho tài khoản`);
-      loadAccounts();
+      await loadAccounts();
     } catch (e) {
       toast.error('Lỗi: ' + e.message);
     }
   };
 
   const deleteSelected = async () => {
-    if (selectedAccounts.size === 0) return;
-    if (!confirm(`Xóa ${selectedAccounts.size} tài khoản đã chọn?`)) return;
+    const ids = Array.from(selectedAccounts).filter(id => currentAccountIds.has(id));
+    if (ids.length === 0) return;
+    if (!confirm(`Xóa ${ids.length} tài khoản đã chọn?`)) return;
     try {
-      await api('POST', '/accounts/delete-bulk', { ids: Array.from(selectedAccounts) });
+      await api('POST', '/accounts/delete-bulk', { ids, provider });
       toast.success('Đã xóa thành công');
       setSelectedAccounts(new Set());
-      loadAccounts();
+      await loadAccounts();
     } catch (e) {
       toast.error('Lỗi xóa: ' + e.message);
     }
@@ -76,7 +108,7 @@ export default function Accounts() {
         enabled 
       });
       toast.success(`Đã ${enabled ? 'bật' : 'tắt'} tự động cho ${selectedAccounts.size} tài khoản`);
-      loadAccounts();
+      await loadAccounts();
     } catch (e) {
       toast.error('Lỗi: ' + e.message);
     }
@@ -85,7 +117,7 @@ export default function Accounts() {
   const deleteAccount = async (id, name) => {
     if (!confirm(`Xóa tài khoản "${name}"?`)) return;
     try {
-      await api('DELETE', `/accounts/${id}`);
+      await api('DELETE', `/accounts/${id}?provider=${encodeURIComponent(provider)}`);
       toast.success('Đã xóa tài khoản');
       loadAccounts();
     } catch (e) {
@@ -95,7 +127,7 @@ export default function Accounts() {
 
   return (
     <div id="page-accounts">
-      <div className="filter-row sticky-top" style={{ display: 'flex', gap: '10px', marginBottom: '14px', position: 'sticky', top: '0', background: 'var(--bg)', zIndex: '10', padding: '10px 0' }}>
+      <div className="filter-row" style={{ display: 'flex', gap: '10px', marginBottom: '14px', background: 'var(--bg)', padding: '10px 0' }}>
         <input 
           type="text" 
           placeholder="🔍 Tìm theo tên tài khoản..." 
@@ -137,6 +169,7 @@ export default function Accounts() {
             const active = accountStats.active;
             const lastChecked = acc.lastChecked ? timeString(acc.lastChecked) : '—';
             const isChecked = selectedAccounts.has(acc._id);
+            const displayStatus = getDisplayStatus(acc, accountStats);
 
             return (
               <div 
@@ -156,10 +189,15 @@ export default function Accounts() {
                 <div className="acc-card-top">
                   <div>
                     <div className="acc-name">{acc.name}</div>
-                    <div className="acc-id">{acc.adAccountId}</div>
+                    <div className="acc-id">
+                      {acc.adAccountId}
+                      <span className={`acc-provider-badge provider-${acc.provider || 'facebook'}`}>
+                        {acc.provider === 'shopee' ? 'Shopee' : 'Facebook'}
+                      </span>
+                    </div>
                   </div>
-                  <div className={`acc-status ${acc.status}`}>
-                    {acc.status === 'connected' ? '● Online' : acc.status === 'error' ? '✗ Lỗi' : '○ Offline'}
+                  <div className={`acc-status ${displayStatus.className}`} title={displayStatus.title}>
+                    {displayStatus.label}
                   </div>
                 </div>
                 

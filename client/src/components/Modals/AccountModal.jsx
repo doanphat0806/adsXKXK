@@ -1,16 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import { useAppContext } from '../../contexts/AppContext';
 import { api } from '../../lib/api';
+import { isValidAdAccountId } from '../../lib/validators';
 import { toast } from 'react-toastify';
+import InitialAutomationSettings from './InitialAutomationSettings';
+import LinkedPagesField from './LinkedPagesField';
 
 const emptyFormData = {
   name: '',
+  provider: 'facebook',
   fbToken: '',
   adAccountId: '',
   claudeKey: '',
   spendThreshold: 20000,
   checkInterval: 60,
-  autoEnabled: false
+  autoEnabled: false,
+  linkedPageIds: []
 };
 
 const autofillTrapStyle = {
@@ -21,10 +26,8 @@ const autofillTrapStyle = {
   pointerEvents: 'none'
 };
 
-const isValidAdAccountId = (value) => /^(act_)?\d+$/.test(String(value || '').trim());
-
 export default function AccountModal({ data }) {
-  const { closeModal, loadAccounts, appConfig } = useAppContext();
+  const { provider, closeModal, loadAccounts, appConfig } = useAppContext();
   const [formData, setFormData] = useState(emptyFormData);
 
   const isEdit = !!data;
@@ -33,17 +36,19 @@ export default function AccountModal({ data }) {
     if (data) {
       setFormData({
         name: data.name || '',
+        provider: data.provider || 'facebook',
         fbToken: '', // Don't show token
         adAccountId: data.adAccountId || '',
         claudeKey: '', // Don't show key
         spendThreshold: data.spendThreshold || 20000,
         checkInterval: data.checkInterval || 60,
-        autoEnabled: data.autoEnabled || false
+        autoEnabled: data.autoEnabled || false,
+        linkedPageIds: data.linkedPageIds || []
       });
     } else {
-      setFormData(emptyFormData);
+      setFormData({ ...emptyFormData, provider });
     }
-  }, [data]);
+  }, [data, provider]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -51,13 +56,18 @@ export default function AccountModal({ data }) {
       const payload = {
         ...formData,
         name: formData.name.trim(),
+        provider: formData.provider,
         adAccountId: formData.adAccountId.trim(),
         fbToken: formData.fbToken.trim(),
         claudeKey: formData.claudeKey.trim()
       };
 
-      if (!isValidAdAccountId(payload.adAccountId)) {
-        toast.error('Ad Account ID phải là số hoặc dạng act_123456789');
+      if (!payload.adAccountId) {
+        toast.error('Ad Account/Shopee ID không được để trống');
+        return;
+      }
+      if (payload.provider === 'facebook' && !isValidAdAccountId(payload.adAccountId)) {
+        toast.error('Ad Account ID Facebook phải là số hoặc dạng act_123456789');
         return;
       }
 
@@ -113,24 +123,35 @@ export default function AccountModal({ data }) {
             placeholder={isEdit ? "Để trống nếu không đổi" : "EAAxxxxxxxxxx..."}
           />
           <div className="inline-note">
-            {appConfig.hasFbToken ? 'Đã có token dùng chung, có thể bỏ trống' : 'Bắt buộc nếu chưa có token dùng chung'}
+            {formData.provider === 'shopee'
+              ? 'Shopee account không cần Facebook Token nếu chưa dùng Facebook integration.'
+              : appConfig.hasFbToken
+                ? 'Đã có token dùng chung, có thể bỏ trống'
+                : 'Bắt buộc nếu chưa có token dùng chung'}
           </div>
         </div>
         <div className="form-group">
-          <label>Ad Account ID (act_xxxxxxxx)</label>
+          <label>{formData.provider === 'shopee' ? 'Shopee Shop ID / Account ID' : 'Ad Account ID (act_xxxxxxxx)'}</label>
           <input 
             type="text" 
             name="facebook-ad-account-id"
             autoComplete="off"
-            inputMode="numeric"
-            pattern="^(act_)?[0-9]+$"
-            title="Nhap so ID tai khoan quang cao hoac dang act_123456789"
+            inputMode="text"
+            pattern={formData.provider === 'facebook' ? '^(act_)?[0-9]+$' : '.*'}
+            title={formData.provider === 'facebook' ? 'Nhap so ID tai khoan quang cao hoac dang act_123456789' : 'Nhap Shopee shop/account ID'}
             required 
             value={formData.adAccountId} 
             onChange={e => setFormData({ ...formData, adAccountId: e.target.value })} 
-            placeholder="act_123456789"
+            placeholder={formData.provider === 'shopee' ? 'Shopee shop id / account id' : 'act_123456789'}
           />
         </div>
+
+        {formData.provider === 'shopee' && (
+          <LinkedPagesField
+            selectedPageIds={formData.linkedPageIds}
+            onChange={linkedPageIds => setFormData(prev => ({ ...prev, linkedPageIds }))}
+          />
+        )}
         <div className="form-group">
           <label>Claude API Key (Tùy chọn)</label>
           <input 
@@ -147,31 +168,11 @@ export default function AccountModal({ data }) {
         </div>
         
         {!isEdit && (
-          <div style={{ padding: '12px', background: 'var(--s2)', borderRadius: 'var(--radius)', marginBottom: '15px' }}>
-            <div style={{ fontWeight: 'bold', fontSize: '13px', marginBottom: '8px' }}>Cài đặt tự động ban đầu</div>
-            <div className="form-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
-              <div className="form-group" style={{ marginBottom: 0 }}>
-                <label>Thời gian check (s)</label>
-                <input 
-                  type="number" 
-                  value={formData.checkInterval} 
-                  onChange={e => setFormData({ ...formData, checkInterval: parseInt(e.target.value) })} 
-                />
-              </div>
-              <div className="toggle-wrap" style={{ marginTop: '25px' }}>
-                <label className="tgl">
-                  <input 
-                    type="checkbox" 
-                    checked={formData.autoEnabled} 
-                    onChange={e => setFormData({ ...formData, autoEnabled: e.target.checked })} 
-                  />
-                  <div className="tgl-track"></div>
-                  <div className="tgl-thumb"></div>
-                </label>
-                <span>Bật tự động</span>
-              </div>
-            </div>
-          </div>
+          <InitialAutomationSettings
+            checkInterval={formData.checkInterval}
+            autoEnabled={formData.autoEnabled}
+            onChange={changes => setFormData(prev => ({ ...prev, ...changes }))}
+          />
         )}
 
         <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '10px' }}>

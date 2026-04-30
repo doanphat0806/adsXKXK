@@ -4,15 +4,28 @@ import { api } from '../lib/api';
 import { toast } from 'react-toastify';
 
 export default function Topbar({ title }) {
-  const { logout, refreshAll, openModal } = useAppContext();
+  const { provider, logout, refreshAll, loadAll, openModal } = useAppContext();
+  const [discovering, setDiscovering] = React.useState(false);
 
   const handleAutoDiscover = async () => {
+    if (discovering) return;
+    setDiscovering(true);
+
     try {
-      toast.info('Đang tìm kiếm tài khoản...');
-      await api('POST', '/accounts/auto-discover');
-      refreshAll();
+      toast.info('Dang dong bo tai khoan duoc gan trong BM...');
+      const result = await api('POST', '/accounts/auto-discover', {
+        provider,
+        fast: true,
+        maxPages: 5
+      }, {
+        timeoutMs: 90000
+      });
+      await loadAll();
+      toast.success(result.message || 'Da dong bo tai khoan duoc gan trong BM');
     } catch (e) {
-      toast.error('Lỗi: ' + e.message);
+      toast.error('Loi: ' + e.message);
+    } finally {
+      setDiscovering(false);
     }
   };
 
@@ -26,17 +39,27 @@ export default function Topbar({ title }) {
           {new Date().toLocaleDateString('vi-VN')}
         </span>
         <button className="btn btn-ghost btn-sm" onClick={() => openModal('CONFIG')}>Token / API key</button>
-        <button className="btn btn-ghost btn-sm" onClick={refreshAll}>↺ Làm mới</button>
-        <button 
-          className="btn btn-ghost btn-sm" 
+        <button className="btn btn-ghost btn-sm" onClick={refreshAll}>Lam moi</button>
+        <button
+          className="btn btn-ghost btn-sm"
           style={{ borderColor: 'var(--b)', color: 'var(--b)' }}
           onClick={handleAutoDiscover}
+          disabled={discovering}
         >
-          🔍 Auto Discover
+          {discovering ? 'Dang dong bo...' : 'Auto Discover'}
         </button>
-        <button className="btn btn-ghost btn-sm" onClick={() => openModal('BULK_ADD')}>+ Thêm nhiều</button>
-        <button className="btn btn-g btn-sm" onClick={() => openModal('ACCOUNT')}>+ Thêm tài khoản</button>
-        <button className="btn btn-danger btn-sm" onClick={logout}>Đăng xuất</button>
+        <button className="btn btn-ghost btn-sm" onClick={() => openModal('BULK_ADD')}>+ Them nhieu</button>
+        {provider === 'shopee' && (
+          <button
+            className="btn btn-ghost btn-sm"
+            style={{ borderColor: 'var(--g)', color: 'var(--g)' }}
+            onClick={() => openModal('SHOPEE_PAGES')}
+          >
+            + Them Page
+          </button>
+        )}
+        <button className="btn btn-g btn-sm" onClick={() => openModal('ACCOUNT')}>+ Them Tai Khoan</button>
+        <button className="btn btn-danger btn-sm" onClick={logout}>Dang Xuat</button>
       </div>
     </div>
   );

@@ -10,6 +10,7 @@ import Topbar from './components/Topbar';
 import Dashboard from './pages/Dashboard';
 import Accounts from './pages/Accounts';
 import Campaigns from './pages/Campaigns';
+import CloneCampaigns from './pages/CloneCampaigns';
 import Orders from './pages/Orders';
 import Logs from './pages/Logs';
 import CreateCampaign from './pages/Pages';
@@ -19,11 +20,16 @@ function AppContent() {
   const { isAuthenticated } = useAppContext();
   const location = useLocation();
 
+  React.useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  }, [location.pathname]);
+
   const getPageTitle = () => {
     switch(location.pathname) {
       case '/': return 'Dashboard';
       case '/accounts': return 'Tài khoản';
       case '/campaigns': return 'Chiến dịch';
+      case '/clone-campaigns': return 'Nhân Camp';
       case '/orders': return 'Đơn hàng';
       case '/logs': return 'Nhật ký';
       case '/create-campaign': return 'Page';
@@ -45,6 +51,7 @@ function AppContent() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/accounts" element={<Accounts />} />
             <Route path="/campaigns" element={<Campaigns />} />
+            <Route path="/clone-campaigns" element={<CloneCampaigns />} />
             <Route path="/orders" element={<Orders />} />
             <Route path="/logs" element={<Logs />} />
             <Route path="/create-campaign" element={<CreateCampaign />} />

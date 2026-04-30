@@ -5,6 +5,10 @@ const cors = require('cors');
 const cron = require('node-cron');
 const axios = require('axios');
 const path = require('path');
+const { Queue, Worker } = require('bullmq');
+const IORedis = require('ioredis');
+const registerPageRoutes = require('./routes/pageRoutes');
+const { parseBoundedInt } = require('./utils/number');
 
 const app = express();
 const publicDir = path.join(__dirname, 'client', 'dist');
@@ -33,154 +37,148 @@ function isWithinAutoRuleTimeWindow(startTime, endTime) {
   }
 }
 
+const Account = require('./models/Account');
+const Campaign = require('./models/Campaign');
+const Log = require('./models/Log');
+const Config = require('./models/Config');
+const FacebookToken = require('./models/FacebookToken');
+const Order = require('./models/Order');
+const FacebookPost = require('./models/FacebookPost');
+const {
+  buildOrderQuery,
+  useSheetOrders,
+  buildOrderSkuStats,
+  fetchOrderSheetRows,
+  getOrderSheetOrders,
+  getOrderStatsCacheKey,
+  ordersSheetCache,
+  orderStatsCache
+} = require('./services/orderService');
+const {
+  configureFacebookToken,
+  checkAndRefreshFacebookToken,
+  bootstrapFacebookTokenFromEnv,
+  sendTokenAlert,
+  startFacebookTokenCron,
+  FACEBOOK_TOKEN_KEY
+} = require('./services/facebookTokenService');
+const {
+  DEFAULT_CAMPAIGN_DAILY_BUDGET,
+  SHOPEE_CAMPAIGN_DAILY_BUDGET,
+  SHOPEE_AD_SET_BID_AMOUNT,
+  SHOPEE_AGE_MIN,
+  SHOPEE_AGE_MAX,
+  DEFAULT_AD_SET_NAME,
+  DEFAULT_AD_NAME_PREFIX,
+  DEFAULT_POST_LABEL_PREFIX,
+  DEFAULT_CAMPAIGN_OBJECTIVE,
+  DEFAULT_CAMPAIGN_BID_STRATEGY,
+  VN_OFFSET_MS,
+  SHOPEE_CAMPAIGN_BID_STRATEGY,
+  DEFAULT_AD_SET_DESTINATION_TYPE,
+  DEFAULT_AD_SET_OPTIMIZATION_GOAL,
+  META_POST_REQUEST_LIMIT,
+  POSTS_PER_PAGE_LIMIT,
+  SHOPEE_POSTS_PER_PAGE_LIMIT,
+  ALL_POSTS_MAX_LIMIT,
+  CAMPAIGN_CREATE_CONCURRENCY,
+  CAMPAIGN_CREATE_ITEM_DELAY_MS,
+  CAMPAIGN_DUPLICATE_QUEUE_DELAY_MS,
+  CAMPAIGN_DUPLICATE_COPY_STATUS,
+  FB_RATE_LIMIT_BACKOFF_MS,
+  FB_RATE_LIMIT_RETRIES,
+  SHOPEE_AD_ACCOUNT_NAME_PATTERN,
+  FACEBOOK_GRAPH_API_VERSION,
+  FINAL_SPEND_CRON,
+  FINAL_SPEND_TIMEZONE,
+  REDIS_URL,
+  REDIS_QUEUE_ENABLED,
+  REDIS_HOST,
+  REDIS_PORT,
+  REDIS_PASSWORD,
+  CAMPAIGN_DUPLICATE_QUEUE_NAME,
+  CAMPAIGN_DUPLICATE_QUEUE_CONCURRENCY,
+  CAMPAIGN_DUPLICATE_JOB_ATTEMPTS,
+  CAMPAIGN_DUPLICATE_JOB_BACKOFF_MS,
+  CAMPAIGN_SYNC_QUEUE_NAME,
+  CAMPAIGN_SYNC_QUEUE_CONCURRENCY,
+  CAMPAIGN_SYNC_JOB_ATTEMPTS,
+  CAMPAIGN_SYNC_JOB_BACKOFF_MS,
+  CAMPAIGN_SYNC_DAY_DELAY_MS,
+  ORDER_SHEET_SYNC_QUEUE_NAME,
+  ORDER_SHEET_SYNC_QUEUE_CONCURRENCY,
+  ORDER_SHEET_SYNC_JOB_ATTEMPTS,
+  ORDER_SHEET_SYNC_JOB_BACKOFF_MS
+} = require('./config/appConstants');
 
+function normalizeProvider(value) {
+  return String(value || 'facebook').trim().toLowerCase() === 'shopee' ? 'shopee' : 'facebook';
+}
 
-const AccountSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  fbToken: { type: String, default: '' },
-  adAccountId: { type: String, required: true },
-  claudeKey: { type: String, default: '' },
-  spendThreshold: { type: Number, default: 20000 },
-  checkInterval: { type: Number, default: 60 },
-  autoEnabled: { type: Boolean, default: false },
-  status: { type: String, enum: ['connected', 'error', 'disconnected'], default: 'disconnected' },
-  lastChecked: { type: Date },
-  createdAt: { type: Date, default: Date.now }
-});
-
-const ConfigSchema = new mongoose.Schema({
-  key: { type: String, required: true, unique: true },
-  fbToken: { type: String, default: '' },
-  fbTokenExpiresAt: { type: Date },
-  fbTokenLastRefreshTime: { type: Date },
-  fbTokenLastDebugTime: { type: Date },
-  fbTokenLastRefreshError: { type: String, default: '' },
-  claudeKey: { type: String, default: '' },
-  fbAppId: { type: String, default: '' },
-  fbAppSecret: { type: String, default: '' },
-  pancakeApiKey: { type: String, default: '' },
-  pancakeShopId: { type: String, default: '' },
-  autoRuleStartTime: { type: String, default: '00:00' },
-  autoRuleEndTime: { type: String, default: '08:30' },
-  
-  dailyZeroMessageSpendLimit: { type: Number, default: 25000 },
-  dailyHighCostPerMessageLimit: { type: Number, default: 20000 },
-  dailyHighCostSpendLimit: { type: Number, default: 50000 },
-  
-  lifetimeZeroMessageSpendLimit: { type: Number, default: 25000 },
-  lifetimeHighCostPerMessageLimit: { type: Number, default: 20000 },
-  lifetimeHighCostSpendLimit: { type: Number, default: 50000 },
-
-  updatedAt: { type: Date, default: Date.now }
-});
-
-const FacebookTokenSchema = new mongoose.Schema({
-  key: { type: String, required: true, unique: true, default: 'facebook_user' },
-  appId: { type: String, default: '' },
-  appSecret: { type: String, default: '' },
-  token: { type: String, required: true },
-  expires_at: { type: Date },
-  last_refresh_time: { type: Date },
-  last_debug_time: { type: Date },
-  last_error: { type: String, default: '' },
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now }
-});
-
-const CampaignSchema = new mongoose.Schema({
-  accountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account', required: true },
-  campaignId: { type: String, required: true },
-  name: { type: String },
-  status: { type: String },
-  dailyBudget: { type: Number, default: 0 },
-  lifetimeBudget: { type: Number, default: 0 },
-  budgetType: { type: String, default: 'DAILY' },
-  spend: { type: Number, default: 0 },
-  impressions: { type: Number, default: 0 },
-  clicks: { type: Number, default: 0 },
-  messages: { type: Number, default: 0 },
-  costPerMessage: { type: Number, default: 0 },
-  date: { type: String, required: true },
-  updatedAt: { type: Date, default: Date.now }
-}, { autoIndex: false });
-
-CampaignSchema.index(
-  { accountId: 1, campaignId: 1, date: 1 },
-  {
-    unique: true,
-    name: 'campaign_daily_unique',
-    partialFilterExpression: { date: { $type: 'string' } }
+function buildAccountProviderFilter(provider) {
+  const normalizedProvider = normalizeProvider(provider);
+  if (normalizedProvider === 'facebook') {
+    return {
+      $or: [
+        { provider: 'facebook' },
+        { provider: { $exists: false } },
+        { provider: null },
+        { provider: '' }
+      ]
+    };
   }
-);
-CampaignSchema.index({ date: 1, spend: -1 }, { name: 'campaign_date_spend' });
-CampaignSchema.index({ accountId: 1, date: 1, spend: -1 }, { name: 'campaign_account_date_spend' });
+  return { provider: normalizedProvider };
+}
 
-const LogSchema = new mongoose.Schema({
-  accountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account' },
-  accountName: { type: String },
-  level: { type: String, enum: ['info', 'success', 'warn', 'error', 'ai'], default: 'info' },
-  message: { type: String },
-  createdAt: { type: Date, default: Date.now }
-});
+function isShopeeAdAccountName(name) {
+  return SHOPEE_AD_ACCOUNT_NAME_PATTERN.test(String(name || '').trim());
+}
 
-const OrderSchema = new mongoose.Schema({
-  orderId: { type: String, required: true, unique: true },
-  status: { type: String },
-  customerName: { type: String },
-  totalPrice: { type: Number },
-  rawData: { type: Object }, // Lưu toàn bộ payload từ webhook
-  createdAt: { type: Date, default: Date.now }
-});
-OrderSchema.index({ createdAt: -1 }, { name: 'order_createdAt_desc' });
-OrderSchema.index({ status: 1, createdAt: -1 }, { name: 'order_status_createdAt' });
-
-const FacebookPostSchema = new mongoose.Schema({
-  postId: { type: String, required: true, unique: true },
-  pageId: { type: String, index: true },
-  pageName: { type: String },
-  pageAvatar: { type: String },
-  message: { type: String, default: '' },
-  createdTime: { type: Date },
-  permalink: { type: String },
-  picture: { type: String },
-  shares: { type: Number, default: 0 },
-  likes: { type: Number, default: 0 },
-  comments: { type: Number, default: 0 },
-  rawData: { type: Object },
-  fetchedAt: { type: Date, default: Date.now },
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now }
-});
-FacebookPostSchema.index({ pageId: 1, createdTime: -1 });
-FacebookPostSchema.index({ createdTime: -1, fetchedAt: -1 }, { name: 'post_created_fetched_desc' });
-
-const Account = mongoose.model('Account', AccountSchema);
-const Campaign = mongoose.model('Campaign', CampaignSchema);
-const Log = mongoose.model('Log', LogSchema);
-const Config = mongoose.model('Config', ConfigSchema);
-const FacebookToken = mongoose.model('FacebookToken', FacebookTokenSchema);
-const Order = mongoose.model('Order', OrderSchema);
-const FacebookPost = mongoose.model('FacebookPost', FacebookPostSchema);
-
-const DEFAULT_CAMPAIGN_DAILY_BUDGET = 300000;
-const DEFAULT_AD_SET_NAME = 'Nh\u00f3m qu\u1ea3ng c\u00e1o L\u01b0\u1ee3t mua m\u1edbi';
-const DEFAULT_AD_NAME_PREFIX = 'PHAT';
-const DEFAULT_POST_LABEL_PREFIX = 'MS';
-const DEFAULT_CAMPAIGN_OBJECTIVE = 'OUTCOME_SALES';
-const DEFAULT_AD_SET_DESTINATION_TYPE = 'MESSENGER';
-const DEFAULT_AD_SET_OPTIMIZATION_GOAL = 'MESSAGING_PURCHASE_CONVERSION';
-const META_POST_REQUEST_LIMIT = 100;
-const POSTS_PER_PAGE_LIMIT = 150;
-const FACEBOOK_TOKEN_KEY = 'facebook_user';
-const FACEBOOK_TOKEN_REFRESH_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000;
-const FACEBOOK_TOKEN_MAX_ATTEMPTS = 3;
-const FACEBOOK_TOKEN_CRON = process.env.FACEBOOK_TOKEN_CRON || '0 */6 * * *';
-const TOKEN_ALERT_WEBHOOK_URL = process.env.TOKEN_ALERT_WEBHOOK_URL || '';
+function getAccountProviderNameError(provider, name) {
+  if (provider === 'shopee' && !isShopeeAdAccountName(name)) {
+    return 'Tai khoan Shopee chi cho phep ten bat dau bang XK11, XK12 hoac XK13.';
+  }
+  if (provider === 'facebook' && isShopeeAdAccountName(name)) {
+    return 'Tai khoan bat dau bang XK11, XK12 hoac XK13 chi duoc them vao role Shopee.';
+  }
+  return '';
+}
 
 async function addLog(accountId, accountName, level, message) {
   try {
+    if (isShuttingDown || mongoose.connection.readyState !== 1) return;
     await Log.create({ accountId, accountName, level, message });
-  } catch {}
+  } catch { }
+}
+
+const READ_CACHE_TTL_MS = 30 * 1000;
+const readCache = new Map();
+
+function getReadCache(key) {
+  const cached = readCache.get(key);
+  if (!cached) return null;
+  if (Date.now() - cached.createdAt > READ_CACHE_TTL_MS) {
+    readCache.delete(key);
+    return null;
+  }
+  return cached.value;
+}
+
+function setReadCache(key, value) {
+  readCache.set(key, { value, createdAt: Date.now() });
+  if (readCache.size > 100) {
+    const oldestKey = readCache.keys().next().value;
+    readCache.delete(oldestKey);
+  }
+  return value;
+}
+
+function clearCampaignReadCache() {
+  for (const key of readCache.keys()) {
+    if (key.startsWith('campaigns:') || key.startsWith('stats:')) {
+      readCache.delete(key);
+    }
+  }
 }
 
 async function getAppConfig() {
@@ -204,22 +202,78 @@ function normalizeAdAccountId(value) {
   return `act_${numericId}`;
 }
 
-function isValidAdAccountId(value) {
-  return /^act_\d+$/.test(String(value || '').trim());
+function getAdAccountNumericId(value = {}) {
+  const directId = String(value.account_id || '').trim();
+  if (/^\d+$/.test(directId)) return directId;
+
+  const nodeId = String(value.id || '').trim().replace(/^act_/i, '');
+  if (/^\d+$/.test(nodeId)) return nodeId;
+
+  const normalized = normalizeAdAccountId(directId || value.id);
+  return normalized.replace(/^act_/i, '');
+}
+
+function isValidAdAccountId(value, provider = 'facebook') {
+  const raw = String(value || '').trim();
+  if (!raw) return false;
+  if (provider === 'facebook') {
+    return /^act_\d+$/.test(raw) || /^\d+$/.test(raw);
+  }
+  return true; // Shopee ad account / shop id can be free-form
 }
 
 function escapeRegExp(value) {
   return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function parseCodeList(value) {
+function extractShopeeShortLinkCode(value) {
+  const raw = String(value || '').trim();
+  const match = raw.match(/https?:\/\/(?:www\.)?s\.shopee\.vn\/([A-Za-z0-9_-]+)/i);
+  return match?.[1] || '';
+}
+
+function buildPostLookupTerms(value) {
+  const raw = String(value || '').trim();
+  const shortCode = extractShopeeShortLinkCode(raw);
+  return [...new Set([raw, shortCode].map(item => item.trim()).filter(Boolean))];
+}
+
+function parseCampaignCreateItems(value) {
   const source = Array.isArray(value) ? value.join('\n') : String(value || '');
-  return [...new Set(
-    source
-      .split(/[\n,;|]+/)
-      .map(item => item.trim())
-      .filter(Boolean)
-  )];
+  const items = [];
+  const seen = new Set();
+
+  for (const rawLine of source.split(/\n+/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    if (line.includes('|')) {
+      const [namePart, ...lookupParts] = line.split('|');
+      const campaignName = namePart.trim();
+      const lookupTerm = lookupParts.join('|').trim();
+      if (!campaignName || !lookupTerm) continue;
+
+      const key = `${campaignName}\u0000${lookupTerm}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        items.push({ campaignName, lookupTerm });
+      }
+      continue;
+    }
+
+    for (const part of line.split(/[,;]+/)) {
+      const lookupTerm = part.trim();
+      if (!lookupTerm) continue;
+
+      const key = `${lookupTerm}\u0000${lookupTerm}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        items.push({ campaignName: lookupTerm, lookupTerm });
+      }
+    }
+  }
+
+  return items;
 }
 
 function buildCampaignName(code, prefix = '') {
@@ -245,14 +299,21 @@ function buildAdName(code, prefix = DEFAULT_AD_NAME_PREFIX) {
 
 async function buildAccountPayload(input = {}) {
   const config = await getAppConfig();
+  const provider = normalizeProvider(input.provider);
+  const adAccountId = provider === 'facebook'
+    ? normalizeAdAccountId(input.adAccountId)
+    : String(input.adAccountId || '').trim();
+
   return {
     name: String(input.name || '').trim(),
-    fbToken: String(input.fbToken || config?.fbToken || '').trim(),
-    adAccountId: normalizeAdAccountId(input.adAccountId),
+    provider,
+    fbToken: provider === 'facebook' ? String(input.fbToken || config?.fbToken || '').trim() : '',
+    adAccountId,
     claudeKey: String(input.claudeKey || config?.claudeKey || '').trim(),
     spendThreshold: Number(input.spendThreshold || 20000),
     checkInterval: Number(input.checkInterval || 60),
-    autoEnabled: Boolean(input.autoEnabled)
+    autoEnabled: Boolean(input.autoEnabled),
+    linkedPageIds: Array.isArray(input.linkedPageIds) ? input.linkedPageIds : []
   };
 }
 
@@ -262,47 +323,15 @@ function todayStr() {
   return vnTime.toISOString().split('T')[0];
 }
 
+function dateKeyFromVnOffset(daysOffset = 0) {
+  const d = new Date(Date.now() + VN_OFFSET_MS);
+  d.setUTCDate(d.getUTCDate() + daysOffset);
+  return d.toISOString().split('T')[0];
+}
+
 function normalizeCampaignDate(value) {
   const date = String(value || '').trim();
   return date || todayStr();
-}
-
-function buildOrderQuery({ fromDate, toDate } = {}) {
-  const query = {
-    status: { $nin: ['5', 'cancelled', 'deleted'] },
-    'rawData.is_deleted': { $ne: true }
-  };
-
-  if (fromDate || toDate) {
-    query.createdAt = {};
-    if (fromDate) {
-      const d = new Date(`${fromDate}T00:00:00Z`);
-      query.createdAt.$gte = new Date(d.getTime() - 7 * 60 * 60 * 1000);
-    }
-    if (toDate) {
-      const d = new Date(`${toDate}T23:59:59Z`);
-      query.createdAt.$lte = new Date(d.getTime() - 7 * 60 * 60 * 1000);
-    }
-  }
-
-  return query;
-}
-
-function getOrderItemsFromRaw(raw = {}) {
-  return [raw.items, raw.line_items, raw.products, raw.details].find(Array.isArray) || [];
-}
-
-function getOrderItemSku(item = {}) {
-  const variationInfo = item.variation_info || {};
-  return variationInfo.product_display_id ||
-    variationInfo.display_id ||
-    item.sku ||
-    item.item_code ||
-    '';
-}
-
-function normalizeSkuKey(value) {
-  return String(value || '').trim().toUpperCase();
 }
 
 async function upsertDailyCampaign(accountId, campaignId, date, fields = {}) {
@@ -331,6 +360,7 @@ async function upsertDailyCampaign(accountId, campaignId, date, fields = {}) {
   };
 
   try {
+    clearCampaignReadCache();
     return await Campaign.findOneAndUpdate(filter, update, { upsert: true, new: true, setDefaultsOnInsert: true });
   } catch (error) {
     if (error?.code === 11000) {
@@ -356,20 +386,20 @@ function buildVietnamCampaignStart(year, month, day, hour, minute) {
   };
 }
 
-function getTomorrowVietnamCampaignStart() {
-  const vnNow = new Date(Date.now() + 7 * 60 * 60 * 1000);
+function getDefaultVietnamCampaignStart() {
+  const vnNow = new Date(Date.now() + 10 * 60 * 1000 + 7 * 60 * 60 * 1000);
   return buildVietnamCampaignStart(
     vnNow.getUTCFullYear(),
     vnNow.getUTCMonth() + 1,
-    vnNow.getUTCDate() + 1,
-    6,
-    1
+    vnNow.getUTCDate(),
+    vnNow.getUTCHours(),
+    vnNow.getUTCMinutes()
   );
 }
 
 function parseVietnamCampaignStart(value) {
   const raw = String(value || '').trim();
-  if (!raw) return getTomorrowVietnamCampaignStart();
+  if (!raw) return getDefaultVietnamCampaignStart();
 
   const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
   if (!match) {
@@ -398,9 +428,35 @@ function parseVietnamCampaignStart(value) {
   return scheduledStart;
 }
 
-function parseCampaignAgeRange(ageMinValue, ageMaxValue) {
-  const ageMin = parseBoundedInt(ageMinValue, 22, 13, 65);
-  const ageMax = parseBoundedInt(ageMaxValue, 47, 13, 65);
+function parseVietnamCampaignEnd(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+  if (!match) {
+    throw new Error('Thoi gian ket thuc khong hop le. Dung dang YYYY-MM-DDTHH:mm');
+  }
+
+  const [, year, month, day, hour, minute] = match.map(Number);
+  const dateCheck = new Date(Date.UTC(year, month - 1, day));
+  if (
+    month < 1 || month > 12 ||
+    day < 1 || day > 31 ||
+    hour < 0 || hour > 23 ||
+    minute < 0 || minute > 59 ||
+    dateCheck.getUTCFullYear() !== year ||
+    dateCheck.getUTCMonth() + 1 !== month ||
+    dateCheck.getUTCDate() !== day
+  ) {
+    throw new Error('Thoi gian ket thuc khong hop le. Dung dang YYYY-MM-DDTHH:mm');
+  }
+
+  return buildVietnamCampaignStart(year, month, day, hour, minute);
+}
+
+function parseCampaignAgeRange(ageMinValue, ageMaxValue, defaultAgeMin = 18, defaultAgeMax = 50) {
+  const ageMin = parseBoundedInt(ageMinValue, defaultAgeMin, 13, 65);
+  const ageMax = parseBoundedInt(ageMaxValue, defaultAgeMax, 13, 65);
   if (ageMin > ageMax) {
     throw new Error('Tuoi tu phai nho hon hoac bang tuoi den');
   }
@@ -425,6 +481,7 @@ async function exchangeToken(shortToken, appId, appSecret) {
 
 const FB_TRANSIENT_STATUSES = new Set([500, 502, 503, 504]);
 const FB_TRANSIENT_CODES = new Set([1, 2, 4, 17, 32, 341, 613]);
+const FB_CAMPAIGN_CREATE_REQUEST_OPTIONS = { retries: 1, rateLimitRetries: 1 };
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -433,7 +490,21 @@ function sleep(ms) {
 function isTransientFbResponse(status, data) {
   const code = Number(data?.error?.code);
   const subcode = Number(data?.error?.error_subcode);
-  return FB_TRANSIENT_STATUSES.has(Number(status)) || FB_TRANSIENT_CODES.has(code) || subcode === 99;
+  return !status || FB_TRANSIENT_STATUSES.has(Number(status)) || FB_TRANSIENT_CODES.has(code) || subcode === 99 || isFbRateLimitResponse(data);
+}
+
+function isFbRateLimitResponse(data) {
+  const apiError = data?.error || {};
+  const code = Number(apiError.code);
+  const subcode = Number(apiError.error_subcode);
+  return [4, 17, 32, 613, 80004].includes(code) || subcode === 2446079;
+}
+
+function getFbRetryDelayMs(error, attempt) {
+  if (error.rateLimited) {
+    return Math.min(FB_RATE_LIMIT_BACKOFF_MS * Math.max(1, attempt + 1), 300000);
+  }
+  return 700 * Math.pow(2, attempt);
 }
 
 function buildFbRequestError(method, status, data, fallbackMessage) {
@@ -446,26 +517,65 @@ function buildFbRequestError(method, status, data, fallbackMessage) {
     return tokenError;
   }
 
-  const error = new Error(`FB ${method} ${status || 'ERR'}: ${JSON.stringify(data) || fallbackMessage}`);
+  const rateLimited = isFbRateLimitResponse(data);
+  const error = new Error(rateLimited
+    ? `FB ${method} bi gioi han API cua tai khoan quang cao. Da tu cho va thu lai; neu van loi hay doi vai phut roi nhan tiep.`
+    : `FB ${method} ${status || 'ERR'}: ${JSON.stringify(data) || fallbackMessage}`);
   error.status = status;
   error.fbData = data;
   error.transient = isTransientFbResponse(status, data);
+  error.rateLimited = rateLimited;
   return error;
 }
 
+function isMessagingPurchaseOptimizationError(error) {
+  const data = error.fbData || error.response?.data || {};
+  const apiError = data.error || {};
+  const blameSpecs = JSON.stringify(apiError.error_data || '').toLowerCase();
+
+  return Number(apiError.code) === 100 &&
+    Number(apiError.error_subcode) === 2490408 &&
+    blameSpecs.includes('optimization_goal');
+}
+
 async function fbGet(token, resourcePath, params = {}, options = {}) {
-  const retries = Number.isFinite(options.retries) ? options.retries : 2;
-  const url = `https://graph.facebook.com/v19.0/${resourcePath}`;
+  const retries = Number.isFinite(options.retries) ? options.retries : 4;
+  const rateLimitRetries = Number.isFinite(options.rateLimitRetries) ? options.rateLimitRetries : FB_RATE_LIMIT_RETRIES;
+  const maxAttempts = Math.max(retries, rateLimitRetries);
+  const url = `https://graph.facebook.com/${FACEBOOK_GRAPH_API_VERSION}/${resourcePath}`;
   let lastError;
 
-  for (let attempt = 0; attempt <= retries; attempt++) {
+  for (let attempt = 0; attempt <= maxAttempts; attempt++) {
     try {
-      const response = await axios.get(url, { params: { access_token: token, ...params } });
+      const response = await axios.get(url, { params: { access_token: token, ...params }, timeout: 30000 });
       return response.data;
     } catch (error) {
       lastError = buildFbRequestError('GET', error.response?.status, error.response?.data, error.message);
-      if (!lastError.transient || attempt === retries) break;
-      await sleep(350 * (attempt + 1));
+      const retryLimit = lastError.rateLimited ? rateLimitRetries : retries;
+      if (!lastError.transient || attempt >= retryLimit) break;
+      await sleep(getFbRetryDelayMs(lastError, attempt));
+    }
+  }
+
+  throw lastError;
+}
+
+async function fbGetUrl(url, options = {}) {
+  const retries = Number.isFinite(options.retries) ? options.retries : 4;
+  const rateLimitRetries = Number.isFinite(options.rateLimitRetries) ? options.rateLimitRetries : FB_RATE_LIMIT_RETRIES;
+  const maxAttempts = Math.max(retries, rateLimitRetries);
+  const timeout = Number.isFinite(options.timeout) ? options.timeout : 30000;
+  let lastError;
+
+  for (let attempt = 0; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await axios.get(url, { timeout });
+      return response.data;
+    } catch (error) {
+      lastError = buildFbRequestError('GET', error.response?.status, error.response?.data, error.message);
+      const retryLimit = lastError.rateLimited ? rateLimitRetries : retries;
+      if (!lastError.transient || attempt >= retryLimit) break;
+      await sleep(getFbRetryDelayMs(lastError, attempt));
     }
   }
 
@@ -473,325 +583,357 @@ async function fbGet(token, resourcePath, params = {}, options = {}) {
 }
 
 async function fbPost(token, resourcePath, body = {}, options = {}) {
-  const retries = Number.isFinite(options.retries) ? options.retries : 2;
-  const url = `https://graph.facebook.com/v19.0/${resourcePath}`;
+  const retries = Number.isFinite(options.retries) ? options.retries : 4;
+  const rateLimitRetries = Number.isFinite(options.rateLimitRetries) ? options.rateLimitRetries : FB_RATE_LIMIT_RETRIES;
+  const maxAttempts = Math.max(retries, rateLimitRetries);
+  const url = `https://graph.facebook.com/${FACEBOOK_GRAPH_API_VERSION}/${resourcePath}`;
   let lastError;
 
-  for (let attempt = 0; attempt <= retries; attempt++) {
+  for (let attempt = 0; attempt <= maxAttempts; attempt++) {
     try {
-      const response = await axios.post(url, { access_token: token, ...body });
+      const response = await axios.post(url, { access_token: token, ...body }, { timeout: 30000 });
       return response.data;
     } catch (error) {
       lastError = buildFbRequestError('POST', error.response?.status, error.response?.data, error.message);
-      if (!lastError.transient || attempt === retries) break;
-      await sleep(350 * (attempt + 1));
+      const retryLimit = lastError.rateLimited ? rateLimitRetries : retries;
+      if (!lastError.transient || attempt >= retryLimit) break;
+      await sleep(getFbRetryDelayMs(lastError, attempt));
     }
   }
 
   throw lastError;
 }
 
-function maskToken(token = '') {
-  const value = String(token || '');
-  if (value.length <= 14) return value ? `${value.slice(0, 3)}...` : '';
-  return `${value.slice(0, 8)}...${value.slice(-6)}`;
-}
+async function fetchAllFbEdge(token, resourcePath, params = {}, options = {}) {
+  const items = [];
+  const requestOptions = options.requestOptions || {};
+  const pageTimeoutMs = Number.isFinite(options.pageTimeoutMs) ? options.pageTimeoutMs : 30000;
+  const firstPage = await fbGet(token, resourcePath, params, requestOptions);
+  if (Array.isArray(firstPage.data)) items.push(...firstPage.data);
 
-function parseFacebookExpiresAt(value) {
-  const seconds = Number(value || 0);
-  if (!Number.isFinite(seconds) || seconds <= 0) return null;
-  return new Date(seconds * 1000);
-}
+  let nextUrl = firstPage.paging?.next || null;
+  let pageCount = 1;
+  const maxPages = Number.isFinite(options.maxPages) ? options.maxPages : 1000;
+  while (nextUrl) {
+    if (pageCount >= maxPages) break;
 
-function getDaysUntil(date) {
-  if (!date) return null;
-  return (date.getTime() - Date.now()) / (24 * 60 * 60 * 1000);
-}
+    const data = await fbGetUrl(nextUrl, { ...requestOptions, timeout: pageTimeoutMs });
+    if (Array.isArray(data?.data)) items.push(...data.data);
+    nextUrl = data?.paging?.next || null;
+    pageCount += 1;
 
-async function retryOperation(label, operation, attempts = FACEBOOK_TOKEN_MAX_ATTEMPTS) {
-  let lastError;
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      return await operation(attempt);
-    } catch (error) {
-      lastError = error;
-      const status = Number(error.response?.status || error.status || 0);
-      const retryable = error.retryable !== false && (!status || status === 429 || status >= 500);
-      const waitMs = 1000 * attempt;
-      console.warn(`${label} failed (${attempt}/${attempts}): ${error.message}`);
-      if (!retryable || attempt >= attempts) break;
-      await sleep(waitMs);
+    if (pageCount > maxPages) {
+      throw new Error(`Dung dong bo ${resourcePath} sau ${maxPages} trang vi Facebook pagination bat thuong`);
     }
   }
-  throw lastError;
+
+  return { items, pageCount };
 }
 
-function getAxiosApiErrorMessage(error) {
-  const status = error.response?.status || error.status || 'ERR';
-  const apiError = error.response?.data?.error;
-  if (apiError) {
-    const parts = [
-      apiError.message,
-      apiError.code ? `code=${apiError.code}` : '',
-      apiError.error_subcode ? `subcode=${apiError.error_subcode}` : '',
-      apiError.fbtrace_id ? `fbtrace_id=${apiError.fbtrace_id}` : ''
-    ].filter(Boolean);
-    return `${status}: ${parts.join(', ')}`;
-  }
-  return `${status}: ${error.message}`;
-}
+async function mapWithConcurrency(inputs, mapper, concurrency = 4) {
+  const results = new Array(inputs.length);
+  let nextIndex = 0;
 
-function createFacebookApiError(action, error) {
-  const apiError = new Error(`${action} failed: ${getAxiosApiErrorMessage(error)}`);
-  const status = Number(error.response?.status || error.status || 0);
-  apiError.status = status;
-  apiError.retryable = status === 429 || status >= 500 || !status;
-  return apiError;
-}
-
-async function sendTokenAlert(message, meta = {}) {
-  console.error(`TOKEN ALERT: ${message}`, meta);
-  if (!TOKEN_ALERT_WEBHOOK_URL) return;
-
-  try {
-    await axios.post(TOKEN_ALERT_WEBHOOK_URL, {
-      text: message,
-      meta,
-      time: new Date().toISOString()
-    }, { timeout: 10000 });
-  } catch (error) {
-    console.error(`Token alert webhook failed: ${error.message}`);
-  }
-}
-
-async function debugFacebookToken(appId, appSecret, token) {
-  let response;
-  try {
-    response = await axios.get('https://graph.facebook.com/debug_token', {
-      params: {
-        input_token: token,
-        access_token: `${appId}|${appSecret}`
-      },
-      timeout: 15000
-    });
-  } catch (error) {
-    throw createFacebookApiError('Facebook debug_token', error);
-  }
-
-  const data = response.data?.data || {};
-  if (!data.is_valid) {
-    const error = new Error(`Facebook token invalid: ${data.error?.message || data.error?.code || 'unknown reason'}`);
-    error.retryable = false;
-    throw error;
-  }
-  return data;
-}
-
-async function exchangeFacebookUserToken(appId, appSecret, currentToken) {
-  let response;
-  try {
-    response = await axios.get('https://graph.facebook.com/oauth/access_token', {
-      params: {
-        grant_type: 'fb_exchange_token',
-        client_id: appId,
-        client_secret: appSecret,
-        fb_exchange_token: currentToken
-      },
-      timeout: 15000
-    });
-  } catch (error) {
-    throw createFacebookApiError('Facebook token exchange', error);
-  }
-
-  if (!response.data?.access_token) {
-    const error = new Error('Facebook exchange response missing access_token');
-    error.retryable = false;
-    throw error;
-  }
-  return response.data;
-}
-
-async function saveFacebookTokenState({ appId, appSecret, token, expiresAt, refreshedAt = null, lastError = '' }) {
-  const now = new Date();
-  const update = {
-    appId,
-    appSecret,
-    token,
-    expires_at: expiresAt || null,
-    last_debug_time: now,
-    last_error: lastError,
-    updatedAt: now
-  };
-  if (refreshedAt) update.last_refresh_time = refreshedAt;
-
-  const tokenState = await FacebookToken.findOneAndUpdate(
-    { key: FACEBOOK_TOKEN_KEY },
-    { $set: update, $setOnInsert: { key: FACEBOOK_TOKEN_KEY, createdAt: now } },
-    { upsert: true, new: true }
-  );
-
-  const configUpdate = {
-    fbAppId: appId,
-    fbAppSecret: appSecret,
-    fbToken: token,
-    fbTokenExpiresAt: expiresAt || null,
-    fbTokenLastDebugTime: now,
-    fbTokenLastRefreshError: lastError,
-    updatedAt: now
-  };
-  if (refreshedAt) configUpdate.fbTokenLastRefreshTime = refreshedAt;
-
-  await Config.findOneAndUpdate(
-    { key: 'app' },
-    { $set: configUpdate, $setOnInsert: { key: 'app' } },
-    { upsert: true }
-  );
-
-  return tokenState;
-}
-
-async function resolveFacebookTokenInput() {
-  const [tokenState, config] = await Promise.all([
-    FacebookToken.findOne({ key: FACEBOOK_TOKEN_KEY }),
-    getAppConfig()
-  ]);
-
-  return {
-    tokenState,
-    appId: String(tokenState?.appId || config?.fbAppId || process.env.FB_APP_ID || '').trim(),
-    appSecret: String(tokenState?.appSecret || config?.fbAppSecret || process.env.FB_APP_SECRET || '').trim(),
-    token: String(tokenState?.token || config?.fbToken || process.env.FB_LONG_LIVED_USER_ACCESS_TOKEN || '').trim()
-  };
-}
-
-async function configureFacebookToken({ app_id, app_secret, long_lived_user_access_token }) {
-  const appId = String(app_id || '').trim();
-  const appSecret = String(app_secret || '').trim();
-  const token = String(long_lived_user_access_token || '').trim();
-
-  if (!appId || !appSecret || !token) {
-    throw new Error('Missing app_id, app_secret, or long_lived_user_access_token');
-  }
-
-  const debugData = await retryOperation('debug Facebook token', () => debugFacebookToken(appId, appSecret, token));
-  const expiresAt = parseFacebookExpiresAt(debugData.expires_at);
-  return saveFacebookTokenState({ appId, appSecret, token, expiresAt });
-}
-
-async function checkAndRefreshFacebookToken({ force = false, source = 'manual' } = {}) {
-  const { appId, appSecret, token } = await resolveFacebookTokenInput();
-  if (!appId || !appSecret || !token) {
-    return { ok: false, skipped: true, reason: 'missing_config' };
-  }
-
-  try {
-    const debugData = await retryOperation('debug Facebook token', () => debugFacebookToken(appId, appSecret, token));
-    const expiresAt = parseFacebookExpiresAt(debugData.expires_at);
-    await saveFacebookTokenState({ appId, appSecret, token, expiresAt });
-
-    const msLeft = expiresAt ? expiresAt.getTime() - Date.now() : Number.POSITIVE_INFINITY;
-    if (!force && msLeft >= FACEBOOK_TOKEN_REFRESH_THRESHOLD_MS) {
-      return {
-        ok: true,
-        refreshed: false,
-        source,
-        expires_at: expiresAt,
-        days_left: getDaysUntil(expiresAt)
-      };
-    }
-
-    const oldToken = token;
-    const exchangeData = await retryOperation('exchange Facebook token', () =>
-      exchangeFacebookUserToken(appId, appSecret, oldToken)
-    );
-    const newToken = exchangeData.access_token;
-
-    let newExpiresAt = exchangeData.expires_in
-      ? new Date(Date.now() + Number(exchangeData.expires_in) * 1000)
-      : null;
-    try {
-      const newDebugData = await retryOperation('debug refreshed Facebook token', () =>
-        debugFacebookToken(appId, appSecret, newToken)
-      );
-      newExpiresAt = parseFacebookExpiresAt(newDebugData.expires_at) || newExpiresAt;
-    } catch (error) {
-      await sendTokenAlert('Refreshed Facebook token but debug_token failed', { source, error: error.message });
-    }
-
-    const refreshedAt = new Date();
-    await saveFacebookTokenState({ appId, appSecret, token: newToken, expiresAt: newExpiresAt, refreshedAt });
-
-    console.log(
-      `[${refreshedAt.toISOString()}] Facebook token refreshed (${source}): ${maskToken(oldToken)} -> ${maskToken(newToken)}; expires_at=${newExpiresAt?.toISOString() || 'unknown'}`
-    );
-
-    return {
-      ok: true,
-      refreshed: true,
-      source,
-      old_token: maskToken(oldToken),
-      new_token: maskToken(newToken),
-      expires_at: newExpiresAt,
-      last_refresh_time: refreshedAt
-    };
-  } catch (error) {
-    await FacebookToken.findOneAndUpdate(
-      { key: FACEBOOK_TOKEN_KEY },
-      { $set: { last_error: error.message, updatedAt: new Date() } }
-    );
-    await Config.findOneAndUpdate(
-      { key: 'app' },
-      { $set: { fbTokenLastRefreshError: error.message, updatedAt: new Date() } }
-    );
-    await sendTokenAlert('Facebook token refresh failed', { source, error: error.message });
-    throw error;
-  }
-}
-
-async function bootstrapFacebookTokenFromEnv() {
-  const envInput = {
-    app_id: process.env.FB_APP_ID,
-    app_secret: process.env.FB_APP_SECRET,
-    long_lived_user_access_token: process.env.FB_LONG_LIVED_USER_ACCESS_TOKEN
-  };
-  if (!envInput.app_id || !envInput.app_secret || !envInput.long_lived_user_access_token) return;
-
-  const existing = await FacebookToken.findOne({ key: FACEBOOK_TOKEN_KEY });
-  if (existing?.token) return;
-
-  await configureFacebookToken(envInput);
-  console.log(`Facebook token configured from environment: ${maskToken(envInput.long_lived_user_access_token)}`);
-}
-
-function startFacebookTokenCron() {
-  if (!cron.validate(FACEBOOK_TOKEN_CRON)) {
-    console.warn(`Invalid FACEBOOK_TOKEN_CRON "${FACEBOOK_TOKEN_CRON}", token cron disabled`);
-    return null;
-  }
-
-  const task = cron.schedule(FACEBOOK_TOKEN_CRON, async () => {
-    try {
-      const result = await checkAndRefreshFacebookToken({ source: 'cron' });
-      if (result.skipped) {
-        console.warn(`Facebook token cron skipped: ${result.reason}`);
+  const workers = Array.from({ length: Math.min(concurrency, inputs.length) }, async () => {
+    while (nextIndex < inputs.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      try {
+        results[currentIndex] = await mapper(inputs[currentIndex], currentIndex);
+      } catch (error) {
+        results[currentIndex] = { error };
       }
-    } catch (error) {
-      console.error(`Facebook token cron failed: ${error.message}`);
     }
   });
 
-  console.log(`Facebook token cron scheduled: ${FACEBOOK_TOKEN_CRON}`);
-  return task;
+  await Promise.all(workers);
+  return results;
 }
 
-function getPauseReason(spend, messages, costPerMessage, limits, budgetType) {
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+async function fetchAdAccountsWithSpend(token, adAccounts, options = {}) {
+  const datePreset = String(options.datePreset || 'this_year').trim() || 'this_year';
+  const batchSize = parseBoundedInt(options.batchSize, 50, 1, 50);
+  const batchConcurrency = parseBoundedInt(options.concurrency, 3, 1, 5);
+  const chunks = chunkArray(adAccounts, batchSize);
+  const accountsWithSpend = [];
+  const spendCheckErrors = [];
+
+  const chunkResults = await mapWithConcurrency(chunks, async (chunk) => {
+    const batch = chunk.map(adAccount => {
+      const acctId = normalizeAdAccountId(adAccount.account_id || adAccount.id);
+      const params = new URLSearchParams({
+        fields: 'spend',
+        date_preset: datePreset,
+        level: 'account',
+        limit: '1'
+      });
+      return {
+        method: 'GET',
+        relative_url: `${acctId}/insights?${params.toString()}`
+      };
+    });
+
+    const response = await fbPost(token, '', { batch: JSON.stringify(batch) }, { retries: 2, rateLimitRetries: 2 });
+    return { chunk, response };
+  }, batchConcurrency);
+
+  for (const result of chunkResults) {
+    if (result?.error) {
+      const message = result.error.message || String(result.error);
+      spendCheckErrors.push({ error: message });
+      continue;
+    }
+
+    const responses = Array.isArray(result.response) ? result.response : [];
+    result.chunk.forEach((adAccount, index) => {
+      const item = responses[index] || {};
+      if (item.code < 200 || item.code >= 300) {
+        spendCheckErrors.push({
+          name: adAccount.name,
+          accountId: adAccount.account_id,
+          error: item.body || `HTTP ${item.code || 'ERR'}`
+        });
+        return;
+      }
+
+      try {
+        const body = JSON.parse(item.body || '{}');
+        const spend = Number(body.data?.[0]?.spend || 0);
+        if (Number.isFinite(spend) && spend > 0) {
+          accountsWithSpend.push({ ...adAccount, spend });
+        }
+      } catch (error) {
+        spendCheckErrors.push({
+          name: adAccount.name,
+          accountId: adAccount.account_id,
+          error: error.message
+        });
+      }
+    });
+  }
+
+  return { accountsWithSpend, spendCheckErrors, datePreset };
+}
+
+function getCopiedObjectId(response = {}, objectType) {
+  const keysByType = {
+    campaign: ['copied_campaign_id', 'campaign_id'],
+    adset: ['copied_adset_id', 'adset_id'],
+    ad: ['copied_ad_id', 'ad_id']
+  };
+
+  for (const key of keysByType[objectType] || []) {
+    if (response[key]) return String(response[key]);
+  }
+
+  const copiedObject = response[`copied_${objectType}`] || response[objectType];
+  if (copiedObject?.id) return String(copiedObject.id);
+  if (response.id) return String(response.id);
+  return '';
+}
+
+function isStandardEnhancementsCreativeError(error) {
+  const apiError = (error.fbData || error.response?.data || {}).error || {};
+  return Number(apiError.code) === 100 && Number(apiError.error_subcode) === 3858504;
+}
+
+async function waitCampaignDuplicateQueue() {
+  if (CAMPAIGN_DUPLICATE_QUEUE_DELAY_MS > 0) {
+    await sleep(CAMPAIGN_DUPLICATE_QUEUE_DELAY_MS);
+  }
+}
+
+async function createAdWithExistingCreative(fbToken, acctId, sourceAd, copiedAdSetId) {
+  const creativeId = String(sourceAd.creative?.id || '').trim();
+  if (!creativeId) {
+    throw new Error(`Khong tim thay creative_id cua ad ${sourceAd.name || sourceAd.id}`);
+  }
+
+  return fbPost(fbToken, `${acctId}/ads`, {
+    name: sourceAd.name || sourceAd.id,
+    adset_id: copiedAdSetId,
+    creative: { creative_id: creativeId },
+    status: CAMPAIGN_DUPLICATE_COPY_STATUS
+  }, { retries: 3 });
+}
+
+async function activateCopiedCampaignHierarchy(fbToken, copiedCampaignId, copiedAdSets = [], copiedAds = []) {
+  try {
+    await fbPost(fbToken, copiedCampaignId, { status: 'ACTIVE' }, { retries: 3 });
+    await waitCampaignDuplicateQueue();
+
+    for (const adSet of copiedAdSets) {
+      await fbPost(fbToken, adSet.copiedAdSetId, { status: 'ACTIVE' }, { retries: 3 });
+      await waitCampaignDuplicateQueue();
+    }
+
+    for (const ad of copiedAds) {
+      await fbPost(fbToken, ad.copiedAdId, { status: 'ACTIVE' }, { retries: 3 });
+      await waitCampaignDuplicateQueue();
+    }
+  } catch (error) {
+    throw new Error(`Da copy xong nhung khong bat ACTIVE duoc: ${error.message}`);
+  }
+}
+
+async function duplicateCampaignExactQueued(fbToken, campaign, copyOptions = {}) {
+  const account = campaign.accountId || {};
+  const acctId = normalizeAdAccountId(account.adAccountId || '');
+  if (!acctId) {
+    throw new Error('Khong xac dinh duoc tai khoan quang cao de tao ad moi');
+  }
+
+  const campaignName = campaign.name || campaign.campaignId;
+  const campaignCopyResponse = await fbPost(fbToken, `${campaign.campaignId}/copies`, {
+    deep_copy: '0',
+    status_option: CAMPAIGN_DUPLICATE_COPY_STATUS,
+    name: campaignName
+  }, { retries: 3 });
+
+  const copiedCampaignId = getCopiedObjectId(campaignCopyResponse, 'campaign');
+  if (!copiedCampaignId) {
+    throw new Error('Facebook khong tra ve ID campaign moi');
+  }
+
+  await waitCampaignDuplicateQueue();
+
+  const { items: sourceAdSets } = await fetchAllFbEdge(fbToken, `${campaign.campaignId}/adsets`, {
+    fields: 'id,name,status,optimization_goal',
+    limit: 100
+  });
+
+  const copiedAdSets = [];
+  const copiedAds = [];
+
+  for (const sourceAdSet of sourceAdSets) {
+    let adSetCopyResponse;
+    let adSetCopyMode = 'copy';
+
+    try {
+      adSetCopyResponse = await fbPost(fbToken, `${sourceAdSet.id}/copies`, {
+        deep_copy: '0',
+        status_option: CAMPAIGN_DUPLICATE_COPY_STATUS,
+        campaign_id: copiedCampaignId,
+        name: sourceAdSet.name || undefined,
+        ...copyOptions
+      }, { retries: 3 });
+    } catch (error) {
+      if (!isMessagingPurchaseOptimizationError(error)) throw error;
+      throw new Error(
+        `Khong copy duoc adset "${sourceAdSet.name || sourceAdSet.id}" voi toi uu luot mua. ` +
+        'Meta bao page/campaign chua du dieu kien dung MESSAGING_PURCHASE_CONVERSION. ' +
+        'Can gui purchase events cho Meta va du dieu kien Purchases through Messaging roi moi copy duoc.'
+      );
+    }
+
+    const copiedAdSetId = getCopiedObjectId(adSetCopyResponse, 'adset');
+    if (!copiedAdSetId) {
+      throw new Error(`Facebook khong tra ve ID adset moi cho ${sourceAdSet.name || sourceAdSet.id}`);
+    }
+
+    copiedAdSets.push({
+      sourceAdSetId: sourceAdSet.id,
+      copiedAdSetId,
+      name: sourceAdSet.name || '',
+      copyMode: adSetCopyMode,
+      sourceOptimizationGoal: sourceAdSet.optimization_goal || '',
+      copiedOptimizationGoal: sourceAdSet.optimization_goal || '',
+      raw: adSetCopyResponse
+    });
+
+    await waitCampaignDuplicateQueue();
+
+    const { items: sourceAds } = await fetchAllFbEdge(fbToken, `${sourceAdSet.id}/ads`, {
+      fields: 'id,name,status,creative{id}',
+      limit: 100
+    });
+
+    for (const sourceAd of sourceAds) {
+      let adCopyResponse;
+      let adCopyMode = 'copy';
+
+      try {
+        adCopyResponse = await fbPost(fbToken, `${sourceAd.id}/copies`, {
+          status_option: CAMPAIGN_DUPLICATE_COPY_STATUS,
+          adset_id: copiedAdSetId,
+          name: sourceAd.name || undefined
+        }, { retries: 3 });
+      } catch (error) {
+        if (!isStandardEnhancementsCreativeError(error)) throw error;
+        adCopyResponse = await createAdWithExistingCreative(fbToken, acctId, sourceAd, copiedAdSetId);
+        adCopyMode = 'reuse_creative';
+      }
+
+      const copiedAdId = getCopiedObjectId(adCopyResponse, 'ad');
+      if (!copiedAdId) {
+        throw new Error(`Facebook khong tra ve ID ad moi cho ${sourceAd.name || sourceAd.id}`);
+      }
+
+      copiedAds.push({
+        sourceAdId: sourceAd.id,
+        copiedAdId,
+        sourceAdSetId: sourceAdSet.id,
+        copiedAdSetId,
+        name: sourceAd.name || '',
+        copyMode: adCopyMode,
+        raw: adCopyResponse
+      });
+
+      await waitCampaignDuplicateQueue();
+    }
+  }
+
+  await activateCopiedCampaignHierarchy(fbToken, copiedCampaignId, copiedAdSets, copiedAds);
+
+  const copiedCampaign = await fbGet(fbToken, copiedCampaignId, {
+    fields: 'id,name,status'
+  }, { retries: 3 }).catch(() => null);
+
+  return {
+    copiedCampaignId,
+    copiedCampaignName: copiedCampaign?.name || campaignName,
+    copiedCampaignStatus: copiedCampaign?.status || 'ACTIVE',
+    copiedAdSets,
+    copiedAds,
+    raw: campaignCopyResponse
+  };
+}
+
+function getPauseReason(provider, spend, messages, costPerMessage, clicks, costPerClick, limits, budgetType) {
+  const normalizedProvider = normalizeProvider(provider);
   const isDaily = budgetType === 'DAILY';
   const limitZero = isDaily ? limits.dailyZeroMessageSpendLimit : limits.lifetimeZeroMessageSpendLimit;
   const limitHighCostPerMsg = isDaily ? limits.dailyHighCostPerMessageLimit : limits.lifetimeHighCostPerMessageLimit;
   const limitHighCostSpend = isDaily ? limits.dailyHighCostSpendLimit : limits.lifetimeHighCostSpendLimit;
+  const limitClicks = isDaily ? limits.dailyClickLimit : limits.lifetimeClickLimit;
+  const limitCpc = isDaily ? limits.dailyCpcLimit : limits.lifetimeCpcLimit;
 
-  if (messages <= 0 && spend >= limitZero) {
-    return `Khong co tin nhan va da tieu tu ${limitZero.toLocaleString()}d`;
+  if (normalizedProvider === 'shopee') {
+    if (limitCpc > 0 && costPerClick > limitCpc) {
+      return `Chi phi moi click ${Math.round(costPerClick).toLocaleString()}d > ${limitCpc.toLocaleString()}d`;
+    }
+    return null;
+  }
+
+  if (normalizedProvider !== 'facebook') {
+    return null;
+  }
+
+  if (limitClicks > 0 && clicks >= limitClicks) {
+    return `Clicks tren lien ket >= ${limitClicks.toLocaleString()}`;
+  }
+
+  if (messages <= 1 && spend >= limitZero) {
+    const messageText = messages <= 0 ? 'khong co tin nhan' : 'chi co 1 tin nhan';
+    return `Campaign ${messageText} va da tieu tu ${limitZero.toLocaleString()}d`;
   }
 
   if (
@@ -819,6 +961,15 @@ function getCampaignMessageStats(campaign) {
   return { spend, messages, costPerMessage };
 }
 
+async function fetchShopeeAccountData(account) {
+  const today = todayStr();
+  const campaigns = await Campaign.find({ accountId: account._id, date: today }).lean();
+  const totalSpend = campaigns.reduce((sum, campaign) => sum + (campaign.spend || 0), 0);
+  const totalMessages = campaigns.reduce((sum, campaign) => sum + (campaign.messages || 0), 0);
+  const unreadMessages = 0;
+  return { campaigns, totalSpend, totalMessages, unreadMessages };
+}
+
 async function fetchAccountData(account) {
   const today = todayStr();
   const { fbToken } = await getEffectiveSecrets(account);
@@ -828,16 +979,18 @@ async function fetchAccountData(account) {
     ? account.adAccountId
     : `act_${account.adAccountId}`;
 
-  const data = await fbGet(fbToken, `${acctId}/campaigns`, {
+  const { items: campaigns } = await fetchAllFbEdge(fbToken, `${acctId}/campaigns`, {
     fields: 'id,name,status,daily_budget,lifetime_budget,insights.date_preset(today){spend,impressions,clicks,actions,cost_per_action_type}',
-    limit: 50,
+    limit: 500,
     date_preset: 'today'
   });
 
-  const campaigns = data.data || [];
   let totalMessages = 0;
+  const seenCampaignIds = new Set();
 
   for (const campaign of campaigns) {
+    if (!campaign.id) continue;
+    seenCampaignIds.add(String(campaign.id));
     const insights = campaign.insights?.data?.[0] || {};
     const impressions = parseInt(insights.impressions || 0, 10);
     const clicks = parseInt(insights.clicks || 0, 10);
@@ -864,6 +1017,42 @@ async function fetchAccountData(account) {
     });
   }
 
+  const todayInsights = await fetchAccountInsightsInRange(account, today, today);
+  let insightTotalSpend = 0;
+  let insightTotalMessages = 0;
+  for (const insight of todayInsights) {
+    if (!insight.campaign_id) continue;
+    seenCampaignIds.add(String(insight.campaign_id));
+    const spend = parseFloat(insight.spend || 0);
+    const impressions = parseInt(insight.impressions || 0, 10);
+    const clicks = parseInt(insight.clicks || 0, 10);
+    const actions = insight.actions || [];
+    const msgAction = actions.find(action =>
+      action.action_type === 'onsite_conversion.messaging_conversation_started_7d' ||
+      action.action_type === 'onsite_conversion.total_messaging_connection' ||
+      action.action_type === 'omni_initiated_conversation'
+    );
+    const messages = parseInt(msgAction?.value || 0, 10);
+    const costPerMessage = messages > 0 ? spend / messages : 0;
+    insightTotalSpend += spend;
+    insightTotalMessages += messages;
+
+    await upsertDailyCampaign(account._id, insight.campaign_id, today, {
+      name: insight.campaign_name,
+      spend,
+      impressions,
+      clicks,
+      messages,
+      costPerMessage
+    });
+  }
+
+  await Campaign.deleteMany({
+    accountId: account._id,
+    date: today,
+    campaignId: { $nin: [...seenCampaignIds] }
+  });
+
   let unreadMessages = 0;
   try {
     const conversations = await fbGet(fbToken, 'me/conversations', {
@@ -871,18 +1060,23 @@ async function fetchAccountData(account) {
       limit: 50
     });
     unreadMessages = (conversations.data || []).reduce((sum, item) => sum + (item.unread_count || 0), 0);
-  } catch {}
+  } catch { }
 
-  const totalSpend = campaigns.reduce((sum, campaign) => {
+  const totalSpend = insightTotalSpend || campaigns.reduce((sum, campaign) => {
     return sum + parseFloat(campaign.insights?.data?.[0]?.spend || 0);
   }, 0);
 
-  return { campaigns, totalSpend, totalMessages, unreadMessages };
+  return { campaigns, totalSpend, totalMessages: insightTotalMessages || totalMessages, unreadMessages };
 }
 
 async function runAutoControl(account) {
+  if (!isMongoReady()) return;
+
   try {
-    const { campaigns, totalSpend, totalMessages, unreadMessages } = await fetchAccountData(account);
+    const isShopee = account.provider === 'shopee';
+    const { campaigns, totalSpend, totalMessages, unreadMessages } = isShopee
+      ? await fetchShopeeAccountData(account)
+      : await fetchAccountData(account);
     const { fbToken, claudeKey } = await getEffectiveSecrets(account);
 
     await Account.findByIdAndUpdate(account._id, {
@@ -907,10 +1101,12 @@ async function runAutoControl(account) {
         .filter(campaign => campaign.status === 'ACTIVE')
         .map(campaign => {
           const { spend, messages, costPerMessage } = getCampaignMessageStats(campaign);
-          const isLifetime = !!campaign.lifetime_budget && parseFloat(campaign.lifetime_budget) > 0;
+          const clicks = parseInt(campaign.clicks || campaign.insights?.data?.[0]?.clicks || 0, 10);
+          const costPerClick = clicks > 0 ? spend / clicks : 0;
+          const isLifetime = !!campaign.lifetimeBudget || !!campaign.lifetime_budget && parseFloat(campaign.lifetime_budget) > 0;
           const budgetType = isLifetime ? 'LIFETIME' : 'DAILY';
-          const pauseReason = getPauseReason(spend, messages, costPerMessage, config, budgetType);
-          return pauseReason ? { campaign, spend, messages, costPerMessage, pauseReason } : null;
+          const pauseReason = getPauseReason(account.provider, spend, messages, costPerMessage, clicks, costPerClick, config, budgetType);
+          return pauseReason ? { campaign, spend, messages, costPerMessage, clicks, costPerClick, pauseReason } : null;
         })
         .filter(Boolean);
     } else {
@@ -951,13 +1147,23 @@ async function runAutoControl(account) {
         if (aiMsg) {
           await addLog(account._id, account.name, 'ai', `Claude: ${aiMsg}`);
         }
-      } catch {}
+      } catch { }
     }
 
     if (campaignsToPause.length > 0) {
       for (const item of campaignsToPause) {
+        if (isShopee) {
+          await addLog(
+            account._id,
+            account.name,
+            'warn',
+            `Shopee campaign cần tạm dừng: ${item.campaign.name} · ${item.pauseReason} · tieu ${item.spend.toLocaleString()}d`
+          );
+          continue;
+        }
+
         try {
-          await fbPost(fbToken, item.campaign.id, { 
+          await fbPost(fbToken, item.campaign.id, {
             status: 'PAUSED',
             budget_sharing_enabled: false,
             asset_based_budget_enabled: false
@@ -982,11 +1188,21 @@ async function runAutoControl(account) {
         account._id,
         account.name,
         'warn',
-        `Tam dung ${campaignsToPause.length} chien dich theo rule moi`
+        isShopee
+          ? 'Shopee campaign cần tạm dừng theo rule mới'
+          : `Tam dung ${campaignsToPause.length} chien dich theo rule moi`
       );
     }
   } catch (error) {
+    if (!isMongoReady()) return;
+
     if (error.transient) {
+      if (error.rateLimited) {
+        await Account.findByIdAndUpdate(account._id, {
+          lastChecked: new Date(),
+          status: 'connected'
+        });
+      }
       await addLog(account._id, account.name, 'warn', `Bo qua auto tam thoi: ${error.message}`);
       return;
     }
@@ -997,14 +1213,264 @@ async function runAutoControl(account) {
 }
 
 const accountTimers = {};
+const accountRuns = {};
 let facebookTokenCronTask = null;
+let finalSpendCronTask = null;
 let backgroundOrderSyncRunning = false;
+let isShuttingDown = false;
+let sheetRefreshTimer = null;
+let campaignDuplicateQueue = null;
+let campaignDuplicateWorker = null;
+let campaignSyncQueue = null;
+let campaignSyncWorker = null;
+let orderSheetSyncQueue = null;
+let orderSheetSyncWorker = null;
+let redisQueueAvailable = false;
+const redisConnections = [];
+
+function createRedisConnection() {
+  const connection = REDIS_URL
+    ? new IORedis(REDIS_URL, { maxRetriesPerRequest: null })
+    : new IORedis({
+      host: REDIS_HOST,
+      port: REDIS_PORT,
+      password: REDIS_PASSWORD,
+      maxRetriesPerRequest: null
+    });
+
+  redisConnections.push(connection);
+  return connection;
+}
+
+async function checkRedisAvailable() {
+  if (!REDIS_QUEUE_ENABLED) return false;
+
+  const connection = REDIS_URL
+    ? new IORedis(REDIS_URL, { maxRetriesPerRequest: null, lazyConnect: true })
+    : new IORedis({
+      host: REDIS_HOST,
+      port: REDIS_PORT,
+      password: REDIS_PASSWORD,
+      maxRetriesPerRequest: null,
+      lazyConnect: true
+    });
+
+  try {
+    await connection.connect();
+    await connection.ping();
+    return true;
+  } catch (error) {
+    console.warn(`Redis/BullMQ disabled: cannot connect to ${REDIS_URL || `${REDIS_HOST}:${REDIS_PORT}`} (${error.message})`);
+    return false;
+  } finally {
+    await connection.quit().catch(() => connection.disconnect());
+  }
+}
+
+function initCampaignDuplicateQueue() {
+  if (!REDIS_QUEUE_ENABLED || !redisQueueAvailable || campaignDuplicateQueue) return campaignDuplicateQueue;
+
+  campaignDuplicateQueue = new Queue(CAMPAIGN_DUPLICATE_QUEUE_NAME, {
+    connection: createRedisConnection(),
+    defaultJobOptions: {
+      attempts: CAMPAIGN_DUPLICATE_JOB_ATTEMPTS,
+      backoff: { type: 'fixed', delay: CAMPAIGN_DUPLICATE_JOB_BACKOFF_MS },
+      removeOnComplete: { age: 7 * 24 * 60 * 60, count: 1000 },
+      removeOnFail: { age: 14 * 24 * 60 * 60, count: 1000 }
+    }
+  });
+
+  campaignDuplicateQueue.on('error', error => {
+    console.error(`Campaign duplicate queue error: ${error.message}`);
+  });
+
+  console.log(`Campaign duplicate queue enabled: ${CAMPAIGN_DUPLICATE_QUEUE_NAME}`);
+  return campaignDuplicateQueue;
+}
+
+function startCampaignDuplicateWorker() {
+  if (!campaignDuplicateQueue || campaignDuplicateWorker) return campaignDuplicateWorker;
+
+  campaignDuplicateWorker = new Worker(
+    CAMPAIGN_DUPLICATE_QUEUE_NAME,
+    async job => processCampaignDuplicateExactRequest(job.data, async progress => {
+      await job.updateProgress(progress);
+    }),
+    {
+      connection: createRedisConnection(),
+      concurrency: CAMPAIGN_DUPLICATE_QUEUE_CONCURRENCY
+    }
+  );
+
+  campaignDuplicateWorker.on('completed', job => {
+    console.log(`Campaign duplicate job completed: ${job.id}`);
+  });
+  campaignDuplicateWorker.on('failed', (job, error) => {
+    console.error(`Campaign duplicate job failed ${job?.id || ''}: ${error.message}`);
+  });
+  campaignDuplicateWorker.on('error', error => {
+    console.error(`Campaign duplicate worker error: ${error.message}`);
+  });
+
+  return campaignDuplicateWorker;
+}
+
+function initCampaignSyncQueue() {
+  if (!REDIS_QUEUE_ENABLED || !redisQueueAvailable || campaignSyncQueue) return campaignSyncQueue;
+
+  campaignSyncQueue = new Queue(CAMPAIGN_SYNC_QUEUE_NAME, {
+    connection: createRedisConnection(),
+    defaultJobOptions: {
+      attempts: CAMPAIGN_SYNC_JOB_ATTEMPTS,
+      backoff: { type: 'fixed', delay: CAMPAIGN_SYNC_JOB_BACKOFF_MS },
+      removeOnComplete: { age: 7 * 24 * 60 * 60, count: 1000 },
+      removeOnFail: { age: 14 * 24 * 60 * 60, count: 1000 }
+    }
+  });
+
+  campaignSyncQueue.on('error', error => {
+    console.error(`Campaign sync queue error: ${error.message}`);
+  });
+
+  console.log(`Campaign sync queue enabled: ${CAMPAIGN_SYNC_QUEUE_NAME}`);
+  return campaignSyncQueue;
+}
+
+function startCampaignSyncWorker() {
+  if (!campaignSyncQueue || campaignSyncWorker) return campaignSyncWorker;
+
+  campaignSyncWorker = new Worker(
+    CAMPAIGN_SYNC_QUEUE_NAME,
+    async job => processCampaignSyncHistoryJob(job.data, async progress => {
+      await job.updateProgress(progress);
+    }),
+    {
+      connection: createRedisConnection(),
+      concurrency: CAMPAIGN_SYNC_QUEUE_CONCURRENCY
+    }
+  );
+
+  campaignSyncWorker.on('completed', job => {
+    console.log(`Campaign sync job completed: ${job.id}`);
+  });
+  campaignSyncWorker.on('failed', (job, error) => {
+    console.error(`Campaign sync job failed ${job?.id || ''}: ${error.message}`);
+  });
+  campaignSyncWorker.on('error', error => {
+    console.error(`Campaign sync worker error: ${error.message}`);
+  });
+
+  return campaignSyncWorker;
+}
+
+async function processOrderSheetSyncJob(data = {}, onProgress = null) {
+  const { fromDate, toDate } = data;
+  if (onProgress) {
+    await onProgress({
+      state: 'active',
+      fromDate,
+      toDate,
+      percent: 10,
+      message: 'Dang tai Google Sheet'
+    });
+  }
+
+  const rows = await fetchOrderSheetRows({ refresh: true });
+  const filteredRows = rows.filter(row => {
+    if (fromDate && row.dateKey < fromDate) return false;
+    if (toDate && row.dateKey > toDate) return false;
+    return true;
+  });
+
+  const result = {
+    state: 'completed',
+    source: 'google_sheet',
+    fromDate,
+    toDate,
+    totalRows: rows.length,
+    synced: filteredRows.length,
+    percent: 100,
+    cachedAt: new Date().toISOString(),
+    message: 'Da tai xong Google Sheet'
+  };
+
+  if (onProgress) await onProgress(result);
+  return result;
+}
+
+function initOrderSheetSyncQueue() {
+  if (!REDIS_QUEUE_ENABLED || !redisQueueAvailable || orderSheetSyncQueue) return orderSheetSyncQueue;
+
+  orderSheetSyncQueue = new Queue(ORDER_SHEET_SYNC_QUEUE_NAME, {
+    connection: createRedisConnection(),
+    defaultJobOptions: {
+      attempts: ORDER_SHEET_SYNC_JOB_ATTEMPTS,
+      backoff: { type: 'exponential', delay: ORDER_SHEET_SYNC_JOB_BACKOFF_MS },
+      removeOnComplete: { age: 24 * 60 * 60, count: 100 },
+      removeOnFail: { age: 7 * 24 * 60 * 60, count: 100 }
+    }
+  });
+
+  orderSheetSyncQueue.on('error', error => {
+    console.error(`Order sheet sync queue error: ${error.message}`);
+  });
+
+  console.log(`Order sheet sync queue enabled: ${ORDER_SHEET_SYNC_QUEUE_NAME}`);
+  return orderSheetSyncQueue;
+}
+
+function startOrderSheetSyncWorker() {
+  if (!orderSheetSyncQueue || orderSheetSyncWorker) return orderSheetSyncWorker;
+
+  orderSheetSyncWorker = new Worker(
+    ORDER_SHEET_SYNC_QUEUE_NAME,
+    async job => processOrderSheetSyncJob(job.data, async progress => {
+      await job.updateProgress(progress);
+    }),
+    { connection: createRedisConnection(), concurrency: ORDER_SHEET_SYNC_QUEUE_CONCURRENCY }
+  );
+
+  orderSheetSyncWorker.on('completed', job => {
+    console.log(`Order sheet sync job completed: ${job.id}`);
+  });
+  orderSheetSyncWorker.on('failed', (job, error) => {
+    console.error(`Order sheet sync job failed: ${job?.id || 'unknown'} - ${error.message}`);
+  });
+  orderSheetSyncWorker.on('error', error => {
+    console.error(`Order sheet sync worker error: ${error.message}`);
+  });
+
+  return orderSheetSyncWorker;
+}
+
+function isMongoReady() {
+  return !isShuttingDown && mongoose.connection.readyState === 1;
+}
+
+async function runAutoControlSafely(account, source = 'auto') {
+  const accountId = String(account._id);
+  if (!isMongoReady()) return;
+  if (accountRuns[accountId]) return;
+
+  accountRuns[accountId] = true;
+  try {
+    await runAutoControl(account);
+  } catch (error) {
+    if (!isShuttingDown) {
+      console.error(`${source} auto run failed for ${account.name}: ${error.message}`);
+    }
+  } finally {
+    delete accountRuns[accountId];
+  }
+}
 
 async function startAccountScheduler(account) {
   if (accountTimers[account._id]) clearInterval(accountTimers[account._id]);
   const ms = (account.checkInterval || 60) * 1000;
-  accountTimers[account._id] = setInterval(() => runAutoControl(account), ms);
-  await runAutoControl(account);
+  accountTimers[account._id] = setInterval(() => {
+    runAutoControlSafely(account, 'Scheduled');
+  }, ms);
+  runAutoControlSafely(account, 'Initial');
 }
 
 function stopAccountScheduler(accountId) {
@@ -1024,83 +1490,144 @@ app.get('/api/clean-tokens', async (req, res) => {
 });
 
 app.get('/api/accounts', async (req, res) => {
-  const accounts = await Account.find().select('-fbToken -claudeKey').sort('-createdAt').lean();
-  res.json(accounts);
+  try {
+    const { provider } = req.query;
+    const filter = provider ? buildAccountProviderFilter(provider) : {};
+    const accounts = await Account.find(filter).select('-fbToken -claudeKey').sort('-createdAt').lean();
+    res.json(accounts);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.get('/api/stats', async (req, res) => {
   try {
-    const today = todayStr();
-    const totalAccounts = await Account.countDocuments();
-    const connectedAccounts = await Account.countDocuments({ status: 'connected' });
-    
-    const todayCampaigns = await Campaign.find({ date: today }).lean();
-    let activeCount = 0;
-    let pausedCount = 0;
-    let totalSpend = 0;
-    let totalMessages = 0;
+    const { provider, date, fromDate, toDate } = req.query;
+    const filter = provider ? buildAccountProviderFilter(provider) : {};
+    const fDate = fromDate || date || todayStr();
+    const tDate = toDate || date || fDate;
+    const cacheKey = `stats:${provider || 'all'}:${fDate}:${tDate}`;
+    const cached = getReadCache(cacheKey);
+    if (cached) return res.json(cached);
 
-    for (const c of todayCampaigns) {
-      const status = (c.status || '').toUpperCase();
-      
-      // Chỉ đếm những camp CÓ CHI TIÊU HÔM NAY (bất kể đang chạy hay đã dừng)
-      if (c.spend > 0) {
-        if (status === 'ACTIVE') activeCount++;
-        if (status === 'PAUSED') pausedCount++;
-      }
-      
-      totalSpend += (c.spend || 0);
-      totalMessages += (c.messages || 0);
+    const [totalAccounts, connectedAccounts, accountList] = await Promise.all([
+      Account.countDocuments(filter),
+      Account.countDocuments({ ...filter, status: 'connected' }),
+      provider ? Account.find(filter).select('_id').lean() : Promise.resolve(null)
+    ]);
+
+    // Lọc campaign theo tài khoản thuộc provider
+    let campaignQuery = { date: { $gte: fDate, $lte: tDate } };
+    if (accountList) {
+      campaignQuery.accountId = { $in: accountList.map(account => account._id) };
     }
 
-    const avgCPM = totalMessages > 0 ? totalSpend / totalMessages : 0;
+    const [campaignTotals = {}] = await Campaign.aggregate([
+      { $match: campaignQuery },
+      {
+        $group: {
+          _id: null,
+          activeCount: {
+            $sum: {
+              $cond: [
+                { $and: [{ $gt: ['$spend', 0] }, { $eq: [{ $toUpper: '$status' }, 'ACTIVE'] }] },
+                1,
+                0
+              ]
+            }
+          },
+          pausedCount: {
+            $sum: {
+              $cond: [
+                { $and: [{ $gt: ['$spend', 0] }, { $eq: [{ $toUpper: '$status' }, 'PAUSED'] }] },
+                1,
+                0
+              ]
+            }
+          },
+          totalSpend: { $sum: '$spend' },
+          totalMessages: { $sum: '$messages' }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          activeCount: 1,
+          pausedCount: 1,
+          totalSpend: 1,
+          totalMessages: 1,
+          avgCPM: {
+            $cond: [{ $gt: ['$totalMessages', 0] }, { $divide: ['$totalSpend', '$totalMessages'] }, 0]
+          }
+        }
+      }
+    ]).allowDiskUse(true);
 
-    const tStr = todayStr();
-    const totalOrders = await Order.countDocuments(buildOrderQuery({
-      fromDate: tStr,
-      toDate: tStr
-    }));
+    let totalOrders = 0;
+    let ordersError = '';
+    try {
+      if (useSheetOrders()) {
+        const todayRows = await getOrderSheetOrders({ fromDate: fDate, toDate: tDate, limit: 5000 });
+        // Chỉ đếm dòng có ID2 (orderId) không trống
+        totalOrders = todayRows.filter(o => o.orderId && String(o.orderId).trim() !== '').length;
+      } else {
+        totalOrders = await Order.countDocuments(buildOrderQuery({ fromDate: fDate, toDate: tDate }));
+      }
+    } catch (error) {
+      ordersError = error.message;
+    }
 
-    res.json({
+    res.json(setReadCache(cacheKey, {
       totalAccounts,
       connectedAccounts,
-      activeCount,
-      pausedCount,
-      totalSpend,
-      totalMessages,
-      avgCPM,
-      totalOrders
-    });
+      activeCount: campaignTotals.activeCount || 0,
+      pausedCount: campaignTotals.pausedCount || 0,
+      totalSpend: campaignTotals.totalSpend || 0,
+      totalMessages: campaignTotals.totalMessages || 0,
+      avgCPM: campaignTotals.avgCPM || 0,
+      totalOrders,
+      ordersError,
+      fromDate: fDate,
+      toDate: tDate
+    }));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
 app.get('/api/config', async (req, res) => {
-  const config = await getAppConfig();
-  res.json({
-    hasFbToken: Boolean(config?.fbToken),
-    fbTokenExpiresAt: config?.fbTokenExpiresAt || null,
-    fbTokenLastRefreshTime: config?.fbTokenLastRefreshTime || null,
-    fbTokenLastDebugTime: config?.fbTokenLastDebugTime || null,
-    fbTokenLastRefreshError: config?.fbTokenLastRefreshError || '',
-    hasClaudeKey: Boolean(config?.claudeKey),
-    hasFbAppId: Boolean(config?.fbAppId),
-    hasFbAppSecret: Boolean(config?.fbAppSecret),
-    hasPancakeApiKey: Boolean(config?.pancakeApiKey),
-    hasPancakeShopId: Boolean(config?.pancakeShopId),
-    pancakeShopId: config?.pancakeShopId || '',
-    autoRuleStartTime: config?.autoRuleStartTime || '00:00',
-    autoRuleEndTime: config?.autoRuleEndTime || '08:30',
-    
-    dailyZeroMessageSpendLimit: config?.dailyZeroMessageSpendLimit || 25000,
-    dailyHighCostPerMessageLimit: config?.dailyHighCostPerMessageLimit || 20000,
-    dailyHighCostSpendLimit: config?.dailyHighCostSpendLimit || 50000,
-    
-    lifetimeZeroMessageSpendLimit: config?.lifetimeZeroMessageSpendLimit || 25000,
-    lifetimeHighCostPerMessageLimit: config?.lifetimeHighCostPerMessageLimit || 20000,
-    lifetimeHighCostSpendLimit: config?.lifetimeHighCostSpendLimit || 50000
-  });
+  try {
+    const config = await getAppConfig();
+    res.json({
+      hasFbToken: Boolean(config?.fbToken),
+      fbTokenExpiresAt: config?.fbTokenExpiresAt || null,
+      fbTokenLastRefreshTime: config?.fbTokenLastRefreshTime || null,
+      fbTokenLastDebugTime: config?.fbTokenLastDebugTime || null,
+      fbTokenLastRefreshError: config?.fbTokenLastRefreshError || '',
+      hasClaudeKey: Boolean(config?.claudeKey),
+      hasFbAppId: Boolean(config?.fbAppId),
+      hasFbAppSecret: Boolean(config?.fbAppSecret),
+      hasPancakeApiKey: Boolean(config?.pancakeApiKey),
+      hasPancakeShopId: Boolean(config?.pancakeShopId),
+      pancakeShopId: config?.pancakeShopId || '',
+      autoRuleStartTime: config?.autoRuleStartTime || '00:00',
+      autoRuleEndTime: config?.autoRuleEndTime || '08:30',
+
+      dailyZeroMessageSpendLimit: config?.dailyZeroMessageSpendLimit || 25000,
+      dailyHighCostPerMessageLimit: config?.dailyHighCostPerMessageLimit || 20000,
+      dailyHighCostSpendLimit: config?.dailyHighCostSpendLimit || 50000,
+      dailyClickLimit: config?.dailyClickLimit || 0,
+      dailyCpcLimit: config?.dailyCpcLimit || 500,
+
+      lifetimeZeroMessageSpendLimit: config?.lifetimeZeroMessageSpendLimit || 25000,
+      lifetimeHighCostPerMessageLimit: config?.lifetimeHighCostPerMessageLimit || 20000,
+      lifetimeHighCostSpendLimit: config?.lifetimeHighCostSpendLimit || 50000,
+      lifetimeClickLimit: config?.lifetimeClickLimit || 0,
+      lifetimeCpcLimit: config?.lifetimeCpcLimit || 500
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.post(['/token', '/api/token'], async (req, res) => {
@@ -1161,12 +1688,16 @@ app.put('/api/auto-limits', async (req, res) => {
       dailyZeroMessageSpendLimit: Number(req.body.dailyZeroMessageSpendLimit),
       dailyHighCostPerMessageLimit: Number(req.body.dailyHighCostPerMessageLimit),
       dailyHighCostSpendLimit: Number(req.body.dailyHighCostSpendLimit),
+      dailyClickLimit: Number(req.body.dailyClickLimit || 0),
+      dailyCpcLimit: Number(req.body.dailyCpcLimit || 0),
       lifetimeZeroMessageSpendLimit: Number(req.body.lifetimeZeroMessageSpendLimit),
       lifetimeHighCostPerMessageLimit: Number(req.body.lifetimeHighCostPerMessageLimit),
       lifetimeHighCostSpendLimit: Number(req.body.lifetimeHighCostSpendLimit),
+      lifetimeClickLimit: Number(req.body.lifetimeClickLimit || 0),
+      lifetimeCpcLimit: Number(req.body.lifetimeCpcLimit || 0),
       updatedAt: new Date()
     };
-    
+
     const config = await Config.findOneAndUpdate(
       { key: 'app' },
       { $set: limits, $setOnInsert: { key: 'app' } },
@@ -1248,10 +1779,16 @@ app.post('/api/accounts', async (req, res) => {
     if (!payload.name || !payload.adAccountId) {
       return res.status(400).json({ error: 'Thieu ten tai khoan hoac Ad Account ID' });
     }
-    if (!isValidAdAccountId(payload.adAccountId)) {
-      return res.status(400).json({ error: 'Ad Account ID khong hop le. Dung dang act_123456789 hoac chi nhap so.' });
+    const providerNameError = getAccountProviderNameError(payload.provider, payload.name);
+    if (providerNameError) return res.status(400).json({ error: providerNameError });
+    if (!isValidAdAccountId(payload.adAccountId, payload.provider)) {
+      return res.status(400).json({
+        error: payload.provider === 'shopee'
+          ? 'Ad Account/Shopee shop ID khong hop le.'
+          : 'Ad Account ID khong hop le. Dung dang act_123456789 hoac chi nhap so.'
+      });
     }
-    if (!payload.fbToken) {
+    if (payload.provider === 'facebook' && !payload.fbToken) {
       return res.status(400).json({ error: 'Thieu Facebook Access Token dung chung hoac rieng cho tai khoan' });
     }
 
@@ -1276,80 +1813,191 @@ app.post('/api/accounts/auto-discover', async (req, res) => {
   try {
     const config = await getAppConfig();
     const fbToken = req.body.fbToken || config?.fbToken || '';
+    const provider = normalizeProvider(req.body.provider);
+    const fastSync = req.body.fast === true || req.body.fast === 'true' || req.body.mode === 'fast';
+    const spendDatePreset = String(req.body.spendDatePreset || 'this_year').trim() || 'this_year';
+    const maxPages = req.body.maxPages
+      ? parseBoundedInt(req.body.maxPages, 1000, 1, 1000)
+      : (fastSync ? 5 : 1000);
     if (!fbToken) {
       return res.status(400).json({ error: 'Thieu Facebook Access Token. Hay luu token dung chung truoc.' });
     }
 
-    // Fetch all ad accounts accessible by this token
-    let allAdAccounts = [];
-    let url = 'me/adaccounts';
-    let params = { fields: 'name,account_id,account_status', limit: 200 };
+    const startedAt = Date.now();
+    console.log(`[auto-discover] start provider=${provider} fast=${fastSync} maxPages=${maxPages}`);
 
-    // Paginate through all results
-    while (url) {
-      const data = await fbGet(fbToken, url, params);
-      if (data.data) allAdAccounts = allAdAccounts.concat(data.data);
-      // Check for next page
-      if (data.paging?.next) {
-        // For subsequent pages, use full URL via axios directly
-        try {
-          const nextResp = await axios.get(data.paging.next);
-          if (nextResp.data?.data) allAdAccounts = allAdAccounts.concat(nextResp.data.data);
-          // Continue pagination
-          if (nextResp.data?.paging?.next) {
-            const nextResp2 = await axios.get(nextResp.data.paging.next);
-            if (nextResp2.data?.data) allAdAccounts = allAdAccounts.concat(nextResp2.data.data);
-          }
-        } catch {}
-        break;
-      } else {
-        break;
+    const allAdAccounts = [];
+    const seenAdAccountIds = new Set();
+    const addAdAccounts = (items = []) => {
+      for (const item of items) {
+        const accountId = getAdAccountNumericId(item);
+        if (!accountId || seenAdAccountIds.has(accountId)) continue;
+        seenAdAccountIds.add(accountId);
+        allAdAccounts.push({ ...item, account_id: accountId });
       }
-    }
+    };
+    const sources = [];
+    const sourceErrors = [];
+    const adAccountFields = 'name,account_id,account_status,currency';
+
+    const directAccounts = await fetchAllFbEdge(fbToken, 'me/adaccounts', {
+      fields: adAccountFields,
+      limit: 200
+    }, {
+      maxPages,
+      pageTimeoutMs: fastSync ? 15000 : 30000,
+      requestOptions: fastSync ? { retries: 1, rateLimitRetries: 1 } : {}
+    });
+    addAdAccounts(directAccounts.items);
+    sources.push({ source: 'me/adaccounts', count: directAccounts.items.length, pages: directAccounts.pageCount });
+    console.log(`[auto-discover] fetched ${directAccounts.items.length} accounts in ${directAccounts.pageCount} pages after ${Date.now() - startedAt}ms`);
 
     if (!allAdAccounts.length) {
-      return res.json({ ok: true, found: 0, created: [], skipped: [], message: 'Khong tim thay tai khoan quang cao nao.' });
+      return res.json({ ok: true, found: 0, created: [], skipped: [], sources, sourceErrors, message: 'Khong tim thay tai khoan quang cao nao duoc gan cho user/token nay.' });
+    }
+
+    const discoveredAdAccounts = allAdAccounts.filter(account => {
+      const isShopeeName = isShopeeAdAccountName(account.name);
+      return provider === 'shopee' ? isShopeeName : !isShopeeName;
+    });
+
+    if (!discoveredAdAccounts.length) {
+      return res.json({
+        ok: true,
+        found: 0,
+        totalFetched: allAdAccounts.length,
+        created: [],
+        skipped: [],
+        sources,
+        sourceErrors,
+        message: provider === 'shopee'
+          ? `Tim thay ${allAdAccounts.length} tai khoan nhung khong co tai khoan Shopee nao bat dau bang XK11, XK12 hoac XK13.`
+          : `Tim thay ${allAdAccounts.length} tai khoan nhung tat ca deu thuoc nhom Shopee XK11, XK12, XK13.`
+      });
+    }
+
+    let accountsWithSpend = [];
+    let spendCheckErrors = [];
+    let finalAdAccounts = discoveredAdAccounts;
+
+    if (!fastSync) {
+      console.log(`Checking spend for ${discoveredAdAccounts.length} ${provider} accounts with batch insights (${spendDatePreset})...`);
+      const spendResult = await fetchAdAccountsWithSpend(fbToken, discoveredAdAccounts, {
+        datePreset: spendDatePreset,
+        batchSize: 50,
+        concurrency: 3
+      });
+      accountsWithSpend = spendResult.accountsWithSpend;
+      spendCheckErrors = spendResult.spendCheckErrors;
+
+      console.log(`Found ${accountsWithSpend.length}/${discoveredAdAccounts.length} accounts with confirmed spend > 0 (${spendDatePreset})`);
+
+      if (!accountsWithSpend.length) {
+        return res.json({
+          ok: true,
+          found: 0,
+          totalFetched: allAdAccounts.length,
+          accountsChecked: discoveredAdAccounts.length,
+          created: [],
+          skipped: [],
+          sources,
+          sourceErrors,
+          spendCheckErrors,
+          fast: false,
+          spendScope: spendDatePreset,
+          message: `Tim thay ${discoveredAdAccounts.length} tai khoan ${provider} nhung khong co tai khoan nao da chi tieu theo khoang ${spendDatePreset}.`
+        });
+      }
+
+      finalAdAccounts = accountsWithSpend;
     }
 
     // Check existing accounts in DB
-    const existingAccounts = await Account.find({}, 'adAccountId');
+    const existingAccounts = await Account.find(buildAccountProviderFilter(provider), 'adAccountId');
     const existingIds = new Set(existingAccounts.map(a => {
-      const id = a.adAccountId;
+      const id = String(a.adAccountId || '').trim();
       return id.startsWith('act_') ? id : `act_${id}`;
-    }));
+    }).filter(id => id !== 'act_'));
 
-    const created = [];
+    const pendingCreates = [];
     const skipped = [];
 
-    for (const adAccount of allAdAccounts) {
-      const actId = `act_${adAccount.account_id}`;
+    for (const adAccount of finalAdAccounts) {
+      const actId = normalizeAdAccountId(adAccount.account_id);
       if (existingIds.has(actId)) {
         skipped.push({ name: adAccount.name, adAccountId: actId });
         continue;
       }
 
       try {
-        const payload = await buildAccountPayload({
-          name: adAccount.name || `Account ${adAccount.account_id}`,
-          adAccountId: actId,
-          fbToken: fbToken,
-          spendThreshold: 20000,
-          checkInterval: 60
+        const name = String(adAccount.name || `Account ${adAccount.account_id}`).trim();
+        if (!name || !isValidAdAccountId(actId, provider)) {
+          throw new Error('Ad Account ID khong hop le');
+        }
+        pendingCreates.push({
+          payload: {
+            name,
+            provider,
+            fbToken: provider === 'facebook' ? fbToken : '',
+            adAccountId: provider === 'facebook' ? actId : String(actId || '').trim(),
+            claudeKey: String(config?.claudeKey || '').trim(),
+            spendThreshold: 20000,
+            checkInterval: 60,
+            autoEnabled: false,
+            linkedPageIds: []
+          },
+          source: {
+            name,
+            adAccountId: actId
+          }
         });
-        const account = await Account.create(payload);
-        created.push({ id: account._id, name: account.name, adAccountId: actId });
         existingIds.add(actId); // Prevent duplicates within same batch
       } catch (error) {
         skipped.push({ name: adAccount.name, adAccountId: actId, error: error.message });
       }
     }
 
+    const created = [];
+    if (pendingCreates.length) {
+      try {
+        const insertedAccounts = await Account.insertMany(pendingCreates.map(item => item.payload), { ordered: true });
+        insertedAccounts.forEach((account, index) => {
+          const source = pendingCreates[index].source;
+          created.push({ id: account._id, name: source.name, adAccountId: source.adAccountId });
+        });
+      } catch (error) {
+        for (const item of pendingCreates) {
+          try {
+            const account = await Account.create(item.payload);
+            created.push({ id: account._id, name: item.source.name, adAccountId: item.source.adAccountId });
+          } catch (createError) {
+            skipped.push({
+              name: item.source.name,
+              adAccountId: item.source.adAccountId,
+              error: createError.message
+            });
+          }
+        }
+      }
+    }
+    console.log(`[auto-discover] done provider=${provider} found=${finalAdAccounts.length} created=${created.length} skipped=${skipped.length} after ${Date.now() - startedAt}ms`);
+
     res.json({
       ok: true,
-      found: allAdAccounts.length,
+      found: finalAdAccounts.length,
+      totalFetched: allAdAccounts.length,
+      accountsChecked: discoveredAdAccounts.length,
+      accountsWithSpend: accountsWithSpend.length,
+      fast: fastSync,
       created,
       skipped,
-      message: `Tim thay ${allAdAccounts.length} tai khoan. Da them ${created.length}, bo qua ${skipped.length} (da ton tai).`
+      sources,
+      sourceErrors,
+      spendCheckErrors,
+      spendScope: fastSync ? 'all' : spendDatePreset,
+      message: fastSync
+        ? `Dong bo tai khoan duoc gan trong BM: tim thay ${finalAdAccounts.length}/${discoveredAdAccounts.length} tai khoan ${provider}. Da them ${created.length}, bo qua ${skipped.length} (da ton tai).`
+        : `Tim thay ${finalAdAccounts.length}/${discoveredAdAccounts.length} tai khoan ${provider} duoc gan trong BM va da chi tieu theo khoang ${spendDatePreset}. Da them ${created.length}, bo qua ${skipped.length} (da ton tai).`
     });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -1376,10 +2024,14 @@ app.post('/api/accounts/bulk', async (req, res) => {
         if (!payload.name || !payload.adAccountId) {
           throw new Error('Thieu ten tai khoan hoac Ad Account ID');
         }
-        if (!isValidAdAccountId(payload.adAccountId)) {
-          throw new Error('Ad Account ID khong hop le. Dung dang act_123456789 hoac chi nhap so.');
+        const providerNameError = getAccountProviderNameError(payload.provider, payload.name);
+        if (providerNameError) throw new Error(providerNameError);
+        if (!isValidAdAccountId(payload.adAccountId, payload.provider)) {
+          throw new Error(payload.provider === 'shopee'
+            ? 'Ad Account/Shopee shop ID khong hop le.'
+            : 'Ad Account ID khong hop le. Dung dang act_123456789 hoac chi nhap so.');
         }
-        if (!payload.fbToken) {
+        if (payload.provider === 'facebook' && !payload.fbToken) {
           throw new Error('Thieu Facebook Access Token dung chung');
         }
 
@@ -1399,13 +2051,31 @@ app.post('/api/accounts/bulk', async (req, res) => {
 app.put('/api/accounts/:id', async (req, res) => {
   try {
     const updates = { ...req.body };
+    const existingAccount = await Account.findById(req.params.id).select('provider name').lean();
+    if (!existingAccount) return res.status(404).json({ error: 'Not found' });
+
     if (!updates.fbToken) delete updates.fbToken;
     if (!updates.claudeKey) delete updates.claudeKey;
+    if (Object.prototype.hasOwnProperty.call(updates, 'provider')) {
+      updates.provider = normalizeProvider(updates.provider);
+    }
     if (Object.prototype.hasOwnProperty.call(updates, 'adAccountId')) {
-      updates.adAccountId = normalizeAdAccountId(updates.adAccountId);
-      if (!isValidAdAccountId(updates.adAccountId)) {
-        return res.status(400).json({ error: 'Ad Account ID khong hop le. Dung dang act_123456789 hoac chi nhap so.' });
+      const provider = updates.provider || existingAccount.provider || 'facebook';
+      updates.adAccountId = provider === 'facebook' ? normalizeAdAccountId(updates.adAccountId) : String(updates.adAccountId || '').trim();
+      if (!isValidAdAccountId(updates.adAccountId, provider)) {
+        return res.status(400).json({
+          error: provider === 'shopee'
+            ? 'Ad Account/Shopee shop ID khong hop le.'
+            : 'Ad Account ID khong hop le. Dung dang act_123456789 hoac chi nhap so.'
+        });
       }
+    }
+    const nextProvider = updates.provider || existingAccount.provider || 'facebook';
+    const nextName = Object.prototype.hasOwnProperty.call(updates, 'name') ? updates.name : existingAccount.name;
+    const providerNameError = getAccountProviderNameError(nextProvider, nextName);
+    if (providerNameError) return res.status(400).json({ error: providerNameError });
+    if (req.body.linkedPageIds !== undefined) {
+      updates.linkedPageIds = Array.isArray(req.body.linkedPageIds) ? req.body.linkedPageIds : [];
     }
 
     const account = await Account.findByIdAndUpdate(req.params.id, updates, { new: true });
@@ -1423,11 +2093,21 @@ app.put('/api/accounts/:id', async (req, res) => {
 });
 
 app.delete('/api/accounts/:id', async (req, res) => {
-  await Account.findByIdAndDelete(req.params.id);
-  await Campaign.deleteMany({ accountId: req.params.id });
-  await Log.deleteMany({ accountId: req.params.id });
-  stopAccountScheduler(req.params.id);
-  res.json({ ok: true });
+  try {
+    const provider = String(req.query.provider || '').trim();
+    const filter = { _id: req.params.id };
+    if (provider) Object.assign(filter, buildAccountProviderFilter(provider));
+
+    const account = await Account.findOneAndDelete(filter);
+    if (!account) return res.status(404).json({ error: 'Not found' });
+
+    await Campaign.deleteMany({ accountId: account._id });
+    await Log.deleteMany({ accountId: account._id });
+    stopAccountScheduler(req.params.id);
+    res.json({ ok: true, deletedCount: 1 });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.post('/api/accounts/:id/auto', async (req, res) => {
@@ -1459,9 +2139,9 @@ app.post('/api/accounts/toggle-auto-bulk', async (req, res) => {
   try {
     const { ids, enabled } = req.body;
     if (!Array.isArray(ids)) return res.status(400).json({ error: 'Ids must be an array' });
-    
+
     await Account.updateMany({ _id: { $in: ids } }, { autoEnabled: Boolean(enabled) });
-    
+
     const accounts = await Account.find({ _id: { $in: ids } });
     for (const account of accounts) {
       if (account.autoEnabled) {
@@ -1472,7 +2152,7 @@ app.post('/api/accounts/toggle-auto-bulk', async (req, res) => {
         await addLog(account._id, account.name, 'warn', 'AUTO: OFF (Bulk)');
       }
     }
-    
+
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1482,19 +2162,31 @@ app.post('/api/accounts/toggle-auto-bulk', async (req, res) => {
 app.post('/api/accounts/delete-bulk', async (req, res) => {
   try {
     const { ids } = req.body;
+    const provider = String(req.body.provider || '').trim();
     console.log(`Bulk deleting ${ids?.length} accounts...`);
     if (!Array.isArray(ids)) return res.status(400).json({ error: 'Ids must be an array' });
-    
-    for (const id of ids) {
+
+    const filter = { _id: { $in: ids } };
+    if (provider) Object.assign(filter, buildAccountProviderFilter(provider));
+    const accounts = await Account.find(filter).select('_id').lean();
+    const matchedIds = accounts.map(account => account._id);
+
+    for (const id of matchedIds) {
       stopAccountScheduler(id);
     }
-    
-    const accResult = await Account.deleteMany({ _id: { $in: ids } });
-    const campResult = await Campaign.deleteMany({ accountId: { $in: ids } });
-    const logResult = await Log.deleteMany({ accountId: { $in: ids } });
-    
+
+    const accResult = matchedIds.length
+      ? await Account.deleteMany({ _id: { $in: matchedIds } })
+      : { deletedCount: 0 };
+    const campResult = matchedIds.length
+      ? await Campaign.deleteMany({ accountId: { $in: matchedIds } })
+      : { deletedCount: 0 };
+    const logResult = matchedIds.length
+      ? await Log.deleteMany({ accountId: { $in: matchedIds } })
+      : { deletedCount: 0 };
+
     console.log(`Deleted: ${accResult.deletedCount} accounts, ${campResult.deletedCount} campaigns, ${logResult.deletedCount} logs`);
-    res.json({ ok: true });
+    res.json({ ok: true, deletedCount: accResult.deletedCount });
   } catch (err) {
     console.error('Bulk delete error:', err);
     res.status(500).json({ error: err.message });
@@ -1502,11 +2194,14 @@ app.post('/api/accounts/delete-bulk', async (req, res) => {
 });
 
 app.post('/api/accounts/:id/refresh', async (req, res) => {
-  const account = await Account.findById(req.params.id);
-  if (!account) return res.status(404).json({ error: 'Not found' });
-
   try {
-    const result = await fetchAccountData(account);
+    const account = await Account.findById(req.params.id);
+    if (!account) return res.status(404).json({ error: 'Not found' });
+
+    const result = account.provider === 'shopee'
+      ? await fetchShopeeAccountData(account)
+      : await fetchAccountData(account);
+
     await Account.findByIdAndUpdate(account._id, {
       lastChecked: new Date(),
       status: 'connected'
@@ -1514,25 +2209,35 @@ app.post('/api/accounts/:id/refresh', async (req, res) => {
 
     res.json({ ok: true, ...result });
   } catch (error) {
+    const account = await Account.findById(req.params.id).catch(() => null);
     if (error.transient) {
-      await addLog(account._id, account.name, 'warn', `Bo qua refresh tam thoi: ${error.message}`);
-      return res.json({ ok: false, skipped: true, transient: true, accountId: account._id, error: error.message });
+      if (account) {
+        if (error.rateLimited) {
+          await Account.findByIdAndUpdate(account._id, {
+            lastChecked: new Date(),
+            status: 'connected'
+          });
+        }
+        await addLog(account._id, account.name, 'warn', `Bo qua refresh tam thoi: ${error.message}`);
+      }
+      return res.json({ ok: false, skipped: true, transient: true, accountId: account?._id, error: error.message });
     }
 
-    await Account.findByIdAndUpdate(account._id, { status: 'error' });
+    if (account) {
+      await Account.findByIdAndUpdate(account._id, { status: 'error' });
+    }
     res.status(400).json({ error: error.message });
   }
 });
 
 app.post('/api/campaigns/:campaignId/toggle', async (req, res) => {
-  const { accountId, currentStatus } = req.body;
-  const date = normalizeCampaignDate(req.body.date);
-  const account = await Account.findById(accountId);
-  if (!account) return res.status(404).json({ error: 'Account not found' });
-
-  const newStatus = currentStatus === 'ACTIVE' ? 'PAUSED' : 'ACTIVE';
-
   try {
+    const { accountId, currentStatus } = req.body;
+    const date = normalizeCampaignDate(req.body.date);
+    const account = await Account.findById(accountId);
+    if (!account) return res.status(404).json({ error: 'Account not found' });
+
+    const newStatus = currentStatus === 'ACTIVE' ? 'PAUSED' : 'ACTIVE';
     const { fbToken } = await getEffectiveSecrets(account);
     if (!fbToken) return res.status(400).json({ error: 'Thieu Facebook Access Token' });
 
@@ -1556,18 +2261,224 @@ app.post('/api/campaigns/:campaignId/toggle', async (req, res) => {
   }
 });
 
+async function processCampaignDuplicateExactRequest(body = {}, onProgress = null) {
+  const provider = normalizeProvider(body.provider);
+  const date = normalizeCampaignDate(body.date);
+  const copyCount = parseBoundedInt(body.copyCount, 1, 1, 20);
+  const selectedItems = Array.isArray(body.items) ? body.items : [];
+  const cloneStart = parseVietnamCampaignStart(body.startTime);
+  const cloneEnd = parseVietnamCampaignEnd(body.endTime);
+
+  if (cloneEnd && new Date(cloneEnd.utc).getTime() <= new Date(cloneStart.utc).getTime()) {
+    throw new Error('Thoi gian ket thuc phai lon hon thoi gian bat dau');
+  }
+
+  const requested = selectedItems
+    .map(item => ({
+      campaignId: String(item?.campaignId || '').trim(),
+      accountId: String(item?.accountId || '').trim()
+    }))
+    .filter(item => item.campaignId && mongoose.Types.ObjectId.isValid(item.accountId));
+
+  const selectedKeys = [...new Set(requested.map(item => `${item.accountId}:${item.campaignId}`))];
+  if (!selectedKeys.length) {
+    throw new Error('Chua chon campaign de nhan ban');
+  }
+
+  if (selectedKeys.length * copyCount > 100) {
+    throw new Error('Chi cho phep tao toi da 100 ban copy moi lan');
+  }
+
+  const query = {
+    date,
+    $or: selectedKeys.map(key => {
+      const [accountId, campaignId] = key.split(':');
+      return { accountId, campaignId };
+    })
+  };
+
+  const campaigns = await Campaign.find(query)
+    .populate('accountId', 'name adAccountId provider fbToken claudeKey')
+    .lean();
+
+  const validCampaigns = campaigns.filter(campaign => {
+    const account = campaign.accountId;
+    if (!account) return false;
+    if (provider === 'shopee') return account.provider === 'shopee';
+    return account.provider === 'facebook' || !account.provider;
+  });
+
+  const copyOptions = {
+    start_time: cloneStart.fbStartTime,
+    ...(cloneEnd ? { end_time: cloneEnd.fbStartTime } : {})
+  };
+
+  const copied = [];
+  const errors = [];
+  const totalCopies = validCampaigns.length * copyCount;
+  let finishedCopies = 0;
+
+  if (onProgress) await onProgress({ copied: 0, errors: 0, totalCopies, percent: 0 });
+
+  for (const campaign of validCampaigns) {
+    const account = campaign.accountId;
+    const accountIdValue = account?._id || account;
+    try {
+      const { fbToken } = await getEffectiveSecrets(account);
+      if (!fbToken) throw new Error('Thieu Facebook Access Token');
+
+      for (let index = 0; index < copyCount; index += 1) {
+        const copyResult = await duplicateCampaignExactQueued(fbToken, campaign, copyOptions);
+        const copiedCampaignId = copyResult.copiedCampaignId;
+
+        await upsertDailyCampaign(accountIdValue, copiedCampaignId, todayStr(), {
+          name: copyResult.copiedCampaignName || campaign.name || campaign.campaignId,
+          status: 'ACTIVE',
+          dailyBudget: campaign.dailyBudget || 0,
+          lifetimeBudget: campaign.lifetimeBudget || 0,
+          budgetType: campaign.budgetType || (campaign.lifetimeBudget > 0 ? 'LIFETIME' : 'DAILY')
+        });
+
+        copied.push({
+          sourceCampaignId: campaign.campaignId,
+          copiedCampaignId,
+          copyIndex: index + 1,
+          sourceName: campaign.name || '',
+          name: copyResult.copiedCampaignName || campaign.name || '',
+          copiedCampaignName: copyResult.copiedCampaignName || campaign.name || '',
+          copiedCampaignStatus: 'ACTIVE',
+          accountId: String(accountIdValue),
+          accountName: account.name || '',
+          copyMode: 'queued',
+          copiedAdSetCount: copyResult.copiedAdSets.length,
+          copiedAdCount: copyResult.copiedAds.length,
+          raw: copyResult.raw
+        });
+
+        finishedCopies += 1;
+        if (onProgress) {
+          await onProgress({
+            copied: copied.length,
+            errors: errors.length,
+            totalCopies,
+            percent: totalCopies ? Math.round((finishedCopies / totalCopies) * 100) : 100
+          });
+        }
+      }
+
+      await addLog(
+        accountIdValue,
+        account.name || '',
+        'success',
+        `Nhan ban y nguyen theo hang doi ${copyCount} ban: ${campaign.name || campaign.campaignId}`
+      );
+    } catch (error) {
+      await addLog(
+        accountIdValue,
+        account?.name || '',
+        'error',
+        `Nhan ban y nguyen that bai ${campaign.name || campaign.campaignId}: ${error.message}`
+      );
+
+      errors.push({
+        sourceCampaignId: campaign.campaignId,
+        name: campaign.name || '',
+        accountId: accountIdValue ? String(accountIdValue) : '',
+        accountName: account?.name || '',
+        error: error.message
+      });
+
+      finishedCopies += copyCount;
+      if (onProgress) {
+        await onProgress({
+          copied: copied.length,
+          errors: errors.length,
+          totalCopies,
+          percent: totalCopies ? Math.round((finishedCopies / totalCopies) * 100) : 100
+        });
+      }
+    }
+  }
+
+  const foundKeys = new Set(validCampaigns.map(campaign => `${campaign.accountId?._id || campaign.accountId}:${campaign.campaignId}`));
+  for (const key of selectedKeys) {
+    if (!foundKeys.has(key)) {
+      const [, campaignId] = key.split(':');
+      errors.push({ sourceCampaignId: campaignId, error: 'Khong tim thay campaign phu hop voi tai khoan/provider da chon' });
+    }
+  }
+
+  return {
+    ok: true,
+    date,
+    count: selectedKeys.length,
+    copyCount,
+    copied,
+    errors,
+    startTime: cloneStart.fbStartTime,
+    endTime: cloneEnd?.fbStartTime || ''
+  };
+}
+
+app.post('/api/campaigns/duplicate-exact', async (req, res) => {
+  try {
+    if (campaignDuplicateQueue && req.body?.queue !== false) {
+      startCampaignDuplicateWorker();
+      const job = await campaignDuplicateQueue.add('duplicate-exact', req.body);
+      return res.status(202).json({
+        ok: true,
+        queued: true,
+        queue: CAMPAIGN_DUPLICATE_QUEUE_NAME,
+        jobId: String(job.id),
+        statusUrl: `/api/queues/campaign-duplicates/jobs/${job.id}`
+      });
+    }
+
+    const result = await processCampaignDuplicateExactRequest(req.body);
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get('/api/queues/campaign-duplicates/jobs/:id', async (req, res) => {
+  try {
+    if (!campaignDuplicateQueue) {
+      return res.status(404).json({ error: 'Campaign duplicate queue is not enabled' });
+    }
+
+    const job = await campaignDuplicateQueue.getJob(req.params.id);
+    if (!job) return res.status(404).json({ error: 'Khong tim thay job' });
+
+    const state = await job.getState();
+    res.json({
+      ok: true,
+      id: String(job.id),
+      name: job.name,
+      state,
+      progress: job.progress,
+      attemptsMade: job.attemptsMade,
+      failedReason: job.failedReason || '',
+      returnvalue: job.returnvalue || null,
+      timestamp: job.timestamp,
+      processedOn: job.processedOn || null,
+      finishedOn: job.finishedOn || null
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.post('/api/campaigns/create-from-posts', async (req, res) => {
   try {
     const { accountId } = req.body;
-    const codes = parseCodeList(req.body.codes);
+    const campaignItems = parseCampaignCreateItems(req.body.codes);
     const selectedPageId = String(req.body.pageId || '').trim();
-    const dailyBudget = Math.max(1000, Number(req.body.dailyBudget || DEFAULT_CAMPAIGN_DAILY_BUDGET));
     const campaignPrefix = String(req.body.campaignPrefix || '').trim();
     const adNamePrefix = String(req.body.adNamePrefix || DEFAULT_AD_NAME_PREFIX).trim() || DEFAULT_AD_NAME_PREFIX;
-    const { ageMin, ageMax } = parseCampaignAgeRange(req.body.ageMin, req.body.ageMax);
 
     if (!accountId) return res.status(400).json({ error: 'Thieu tai khoan quang cao' });
-    if (!codes.length) return res.status(400).json({ error: 'Chua co ma san pham nao' });
+    if (!campaignItems.length) return res.status(400).json({ error: 'Chua co ma san pham nao' });
 
     const account = await Account.findById(accountId);
     if (!account) return res.status(404).json({ error: 'Account not found' });
@@ -1578,73 +2489,131 @@ app.post('/api/campaigns/create-from-posts', async (req, res) => {
     const acctId = account.adAccountId.startsWith('act_')
       ? account.adAccountId
       : `act_${account.adAccountId}`;
+
+    const isShopee = account.provider === 'shopee';
+    const dailyBudgetDefault = isShopee ? SHOPEE_CAMPAIGN_DAILY_BUDGET : DEFAULT_CAMPAIGN_DAILY_BUDGET;
+    const dailyBudget = Math.max(1000, Number(req.body.dailyBudget || dailyBudgetDefault));
+    const requestedBidAmount = Number(req.body.bidAmount);
+    const shopeeBidAmount = Number.isFinite(requestedBidAmount) && requestedBidAmount > 0
+      ? Math.round(requestedBidAmount)
+      : SHOPEE_AD_SET_BID_AMOUNT;
+    const { ageMin, ageMax } = parseCampaignAgeRange(
+      req.body.ageMin,
+      req.body.ageMax,
+      isShopee ? SHOPEE_AGE_MIN : 18,
+      isShopee ? SHOPEE_AGE_MAX : 50
+    );
+    const objective = isShopee ? 'OUTCOME_TRAFFIC' : DEFAULT_CAMPAIGN_OBJECTIVE;
+    const destinationType = isShopee ? 'UNDEFINED' : DEFAULT_AD_SET_DESTINATION_TYPE;
+    const optimizationGoal = isShopee ? 'LINK_CLICKS' : DEFAULT_AD_SET_OPTIMIZATION_GOAL;
+    const campaignBidStrategy = isShopee ? SHOPEE_CAMPAIGN_BID_STRATEGY : DEFAULT_CAMPAIGN_BID_STRATEGY;
+
     const scheduledStart = parseVietnamCampaignStart(req.body.startTime);
     const campaignDate = todayStr();
 
     const created = [];
     const errors = [];
+    const createConcurrency = parseBoundedInt(
+      req.body.createConcurrency || req.body.concurrency,
+      CAMPAIGN_CREATE_CONCURRENCY,
+      1,
+      3
+    );
+    const createItemDelayMs = parseBoundedInt(
+      req.body.createItemDelayMs,
+      CAMPAIGN_CREATE_ITEM_DELAY_MS,
+      0,
+      60000
+    );
 
-    for (const code of codes) {
+    const processCampaignItem = async (item) => {
+      const code = item.campaignName;
+      const lookupTerm = item.lookupTerm;
+      let matchedPostInfo = null;
       try {
+        const lookupTerms = buildPostLookupTerms(lookupTerm);
         const postQuery = {
-          message: { $regex: escapeRegExp(code), $options: 'i' }
+          $or: lookupTerms.map(term => ({
+            message: { $regex: escapeRegExp(term), $options: 'i' }
+          }))
         };
         if (selectedPageId) {
           postQuery.pageId = selectedPageId;
         }
 
         const post = await FacebookPost.findOne(postQuery).sort({ createdTime: -1, fetchedAt: -1 }).lean();
+        matchedPostInfo = post ? {
+          postId: post.postId,
+          pageId: post.pageId,
+          pageName: post.pageName
+        } : null;
 
         if (!post) {
           const pageScope = selectedPageId ? ` tren Page ${selectedPageId}` : '';
-          errors.push({ code, error: `Khong tim thay bai viet da luu co ma nay${pageScope}` });
-          continue;
+          return { error: { code, lookupTerm, error: `Khong tim thay bai viet da luu co link/ma nay${pageScope}` } };
         }
 
         const cleanCode = code.replace(/\s+/g, ' ');
         const baseName = buildCampaignName(cleanCode, campaignPrefix);
         const pageId = getPostPageId(post);
         if (!pageId) {
-          errors.push({ code, error: 'Khong xac dinh duoc Page ID cua bai viet de tao camp luot mua qua tin nhan' });
-          continue;
+          return { error: { code, lookupTerm, error: 'Khong xac dinh duoc Page ID cua bai viet de tao camp luot mua qua tin nhan' } };
         }
 
         const adName = buildAdName(cleanCode, adNamePrefix);
-        const campaign = await fbPost(fbToken, `${acctId}/campaigns`, {
+        const finalAdName = isShopee ? baseName : adName;
+        let campaign = await fbPost(fbToken, `${acctId}/campaigns`, {
           name: baseName,
-          objective: DEFAULT_CAMPAIGN_OBJECTIVE,
+          objective: objective,
           status: 'ACTIVE',
           special_ad_categories: [],
           buying_type: 'AUCTION',
           daily_budget: Math.round(dailyBudget),
-          bid_strategy: 'LOWEST_COST_WITHOUT_CAP'
-        });
+          bid_strategy: campaignBidStrategy
+        }, FB_CAMPAIGN_CREATE_REQUEST_OPTIONS);
 
-        const adSetPayload = {
-          name: DEFAULT_AD_SET_NAME,
-          campaign_id: campaign.id,
-          destination_type: DEFAULT_AD_SET_DESTINATION_TYPE,
+        const buildAdSetPayload = (campaignId, nextDestinationType, nextOptimizationGoal) => ({
+          name: isShopee ? baseName : DEFAULT_AD_SET_NAME,
+          campaign_id: campaignId,
+          ...(nextDestinationType && nextDestinationType !== 'UNDEFINED'
+            ? { destination_type: nextDestinationType }
+            : {}),
           billing_event: 'IMPRESSIONS',
-          optimization_goal: DEFAULT_AD_SET_OPTIMIZATION_GOAL,
-          promoted_object: { page_id: pageId },
+          optimization_goal: nextOptimizationGoal,
+          ...(isShopee ? {} : { optimization_sub_event: 'NONE' }),
+          ...(isShopee ? { bid_amount: shopeeBidAmount } : {}),
+          ...(nextDestinationType === 'MESSENGER'
+            ? { promoted_object: { page_id: pageId, smart_pse_enabled: false } }
+            : {}),
           attribution_spec: [{ event_type: 'CLICK_THROUGH', window_days: 1 }],
           targeting: {
             geo_locations: {
               countries: ['VN'],
-              location_types: ['home', 'recent']
+              location_types: isShopee ? ['home', 'recent'] : ['frequently_in', 'home', 'recent']
             },
+            brand_safety_content_filter_levels: isShopee ? ['FACEBOOK_RELAXED'] : ['FACEBOOK_STANDARD', 'AN_STANDARD'],
             targeting_automation: {
               advantage_audience: 0
             },
-            genders: [2],
+            ...(isShopee ? {
+              publisher_platforms: ['facebook', 'instagram', 'messenger'],
+              facebook_positions: ['feed', 'facebook_reels', 'facebook_reels_overlay', 'profile_feed', 'notification', 'instream_video', 'marketplace', 'story', 'search'],
+              instagram_positions: ['stream', 'ig_search', 'profile_reels', 'story', 'explore', 'reels', 'explore_home', 'profile_feed'],
+              messenger_positions: ['story'],
+              device_platforms: ['mobile', 'desktop']
+            } : {
+              genders: [2]
+            }),
             age_min: ageMin,
             age_max: ageMax
           },
           start_time: scheduledStart.fbStartTime,
           status: 'ACTIVE'
-        };
+        });
 
-        const adSet = await fbPost(fbToken, `${acctId}/adsets`, adSetPayload);
+        const adSetPayload = buildAdSetPayload(campaign.id, destinationType, optimizationGoal);
+
+        const adSet = await fbPost(fbToken, `${acctId}/adsets`, adSetPayload, FB_CAMPAIGN_CREATE_REQUEST_OPTIONS);
 
         const creativePayload = {
           name: `${baseName} - Creative`,
@@ -1654,14 +2623,14 @@ app.post('/api/campaigns/create-from-posts', async (req, res) => {
           }
         };
 
-        const creative = await fbPost(fbToken, `${acctId}/adcreatives`, creativePayload);
+        const creative = await fbPost(fbToken, `${acctId}/adcreatives`, creativePayload, FB_CAMPAIGN_CREATE_REQUEST_OPTIONS);
 
         const ad = await fbPost(fbToken, `${acctId}/ads`, {
-          name: adName,
+          name: finalAdName,
           adset_id: adSet.id,
           creative: { creative_id: creative.id },
           status: 'ACTIVE'
-        });
+        }, FB_CAMPAIGN_CREATE_REQUEST_OPTIONS);
 
         await upsertDailyCampaign(account._id, campaign.id, campaignDate, {
           name: baseName,
@@ -1674,65 +2643,703 @@ app.post('/api/campaigns/create-from-posts', async (req, res) => {
           account._id,
           account.name,
           'success',
-          `Tao camp luot mua qua tin nhan tu bai viet: ${cleanCode} -> ${campaign.id}, bat dau ${scheduledStart.display}`
+          isShopee
+            ? `Tao camp Shopee traffic tu bai viet: ${cleanCode} -> ${campaign.id}, bat dau ${scheduledStart.display}`
+            : `Tao camp luot mua qua tin nhan tu bai viet: ${cleanCode} -> ${campaign.id}, bat dau ${scheduledStart.display}`
         );
 
-        created.push({
-          code,
-          postId: post.postId,
-          pageName: post.pageName,
-          objective: DEFAULT_CAMPAIGN_OBJECTIVE,
-          destinationType: DEFAULT_AD_SET_DESTINATION_TYPE,
-          optimizationGoal: DEFAULT_AD_SET_OPTIMIZATION_GOAL,
-          adName,
-          campaignId: campaign.id,
-          adSetId: adSet.id,
-          creativeId: creative.id,
-          adId: ad.id,
-          status: 'ACTIVE',
-          startTime: scheduledStart.fbStartTime,
-          startTimeUtc: scheduledStart.utc,
-          startTimeDisplay: scheduledStart.display
-        });
+        return {
+          created: {
+            code,
+            lookupTerm,
+            postId: post.postId,
+            pageName: post.pageName,
+            objective,
+            destinationType,
+            optimizationGoal,
+            campaignBidStrategy,
+            bidAmount: isShopee ? shopeeBidAmount : undefined,
+            adName: finalAdName,
+            campaignId: campaign.id,
+            adSetId: adSet.id,
+            creativeId: creative.id,
+            adId: ad.id,
+            status: 'ACTIVE',
+            startTime: scheduledStart.fbStartTime,
+            startTimeUtc: scheduledStart.utc,
+            startTimeDisplay: scheduledStart.display
+          }
+        };
       } catch (error) {
-        errors.push({ code, error: error.message });
+        const purchaseOptimizationHint = isMessagingPurchaseOptimizationError(error) && matchedPostInfo
+          ? ` Page "${matchedPostInfo.pageName || matchedPostInfo.pageId}" (${matchedPostInfo.pageId}) chua du dieu kien toi uu hoa luot mua qua tin nhan.`
+          : '';
+        return {
+          error: {
+            code,
+            lookupTerm,
+            error: `${error.message}${purchaseOptimizationHint}`,
+            rateLimited: Boolean(error.rateLimited),
+            objective,
+            destinationType,
+            optimizationGoal,
+            campaignBidStrategy,
+            bidAmount: isShopee ? shopeeBidAmount : undefined,
+            postPageId: matchedPostInfo?.pageId,
+            postPageName: matchedPostInfo?.pageName,
+            postId: matchedPostInfo?.postId
+          }
+        };
+      }
+    };
+
+    let stoppedByRateLimit = false;
+    for (let i = 0; i < campaignItems.length; i += createConcurrency) {
+      const chunk = campaignItems.slice(i, i + createConcurrency);
+      const itemResults = await Promise.allSettled(chunk.map(processCampaignItem));
+
+      for (const result of itemResults) {
+        if (result.status === 'fulfilled') {
+          if (result.value?.created) created.push(result.value.created);
+          if (result.value?.error) errors.push(result.value.error);
+          if (result.value?.error?.rateLimited) stoppedByRateLimit = true;
+          continue;
+        }
+
+        errors.push({ code: 'unknown', error: result.reason?.message || String(result.reason || 'Unknown error') });
+        if (result.reason?.rateLimited) stoppedByRateLimit = true;
+      }
+
+      if (stoppedByRateLimit) {
+        break;
+      }
+
+      if (createItemDelayMs > 0 && i + createConcurrency < campaignItems.length) {
+        await sleep(createItemDelayMs);
       }
     }
 
-    res.json({ ok: true, created, errors, startTime: scheduledStart.fbStartTime, startTimeDisplay: scheduledStart.display });
+    res.json({
+      ok: true,
+      created,
+      errors,
+      createConcurrency,
+      createItemDelayMs,
+      stoppedByRateLimit,
+      startTime: scheduledStart.fbStartTime,
+      startTimeDisplay: scheduledStart.display
+    });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
 });
 
 app.get('/api/accounts/:id/campaigns', async (req, res) => {
-  const date = req.query.date || todayStr();
-  const campaigns = await Campaign.find({ accountId: req.params.id, date }).sort('-spend').lean();
-  res.json(campaigns);
+  const startedAt = Date.now();
+  try {
+    const { date, fromDate, toDate } = req.query;
+    const fDate = fromDate || date || todayStr();
+    const tDate = toDate || date || fDate;
+    const provider = String(req.query.provider || '').trim();
+    const cacheKey = `campaigns:account:${req.params.id}:${provider || 'all'}:${fDate}:${tDate}`;
+    const cached = getReadCache(cacheKey);
+    if (cached) return res.json(cached);
+
+    if (provider) {
+      const account = await Account.findOne({
+        _id: req.params.id,
+        ...buildAccountProviderFilter(provider)
+      }).select('_id').lean();
+      if (!account) return res.json([]);
+    }
+    const match = {
+      accountId: new mongoose.Types.ObjectId(req.params.id),
+      date: { $gte: fDate, $lte: tDate }
+    };
+
+    const campaigns = await Campaign.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: '$campaignId',
+          campaignId: { $first: '$campaignId' },
+          accountId: { $first: '$accountId' },
+          name: { $first: '$name' },
+          status: { $last: '$status' },
+          dailyBudget: { $last: '$dailyBudget' },
+          lifetimeBudget: { $last: '$lifetimeBudget' },
+          spend: { $sum: '$spend' },
+          messages: { $sum: '$messages' },
+          clicks: { $sum: '$clicks' },
+          impressions: { $sum: '$impressions' }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          campaignId: 1,
+          accountId: 1,
+          name: 1,
+          status: 1,
+          dailyBudget: 1,
+          lifetimeBudget: 1,
+          spend: 1,
+          messages: 1,
+          clicks: 1,
+          impressions: 1,
+          costPerMessage: {
+            $cond: [{ $gt: ['$messages', 0] }, { $divide: ['$spend', '$messages'] }, 0]
+          }
+        }
+      },
+      { $sort: { spend: -1 } }
+    ]);
+    console.log(`[campaigns:account] account=${req.params.id} ${fDate}..${tDate} rows=${campaigns.length} ${Date.now() - startedAt}ms`);
+    res.json(setReadCache(cacheKey, campaigns));
+  } catch (error) {
+    console.error(`[campaigns:account] failed after ${Date.now() - startedAt}ms: ${error.message}`);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.get('/api/campaigns/today', async (req, res) => {
-  const date = req.query.date || todayStr();
-  const campaigns = await Campaign.find({ date })
-    .populate('accountId', 'name adAccountId')
-    .sort('-spend')
-    .lean();
-  res.json(campaigns);
+  const startedAt = Date.now();
+  try {
+    const { provider, date, fromDate, toDate } = req.query;
+    const fDate = fromDate || date || todayStr();
+    const tDate = toDate || date || fDate;
+    const cacheKey = `campaigns:today:${provider || 'all'}:${fDate}:${tDate}`;
+    const cached = getReadCache(cacheKey);
+    if (cached) return res.json(cached);
+
+    let match = { date: { $gte: fDate, $lte: tDate } };
+    if (provider) {
+      const accountIds = (await Account.find(buildAccountProviderFilter(provider)).select('_id')).map(a => a._id);
+      match.accountId = { $in: accountIds };
+    }
+
+    // Nếu là khoảng ngày, ta group theo campaignId để cộng dồn spend/messages
+    const campaigns = await Campaign.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: '$campaignId',
+          campaignId: { $first: '$campaignId' },
+          accountId: { $first: '$accountId' },
+          name: { $first: '$name' },
+          status: { $last: '$status' },
+          dailyBudget: { $last: '$dailyBudget' },
+          lifetimeBudget: { $last: '$lifetimeBudget' },
+          spend: { $sum: '$spend' },
+          messages: { $sum: '$messages' },
+          clicks: { $sum: '$clicks' },
+          impressions: { $sum: '$impressions' }
+        }
+      },
+      {
+        $lookup: {
+          from: 'accounts',
+          localField: 'accountId',
+          foreignField: '_id',
+          as: 'accountInfo'
+        }
+      },
+      { $unwind: '$accountInfo' },
+      {
+        $project: {
+          _id: 0,
+          campaignId: 1,
+          accountId: {
+            _id: '$accountInfo._id',
+            name: '$accountInfo.name',
+            adAccountId: '$accountInfo.adAccountId',
+            provider: '$accountInfo.provider'
+          },
+          name: 1,
+          status: 1,
+          dailyBudget: 1,
+          lifetimeBudget: 1,
+          spend: 1,
+          messages: 1,
+          clicks: 1,
+          impressions: 1,
+          costPerMessage: {
+            $cond: [{ $gt: ['$messages', 0] }, { $divide: ['$spend', '$messages'] }, 0]
+          }
+        }
+      },
+      { $sort: { spend: -1 } }
+    ]);
+
+    console.log(`[campaigns:today] provider=${provider || 'all'} ${fDate}..${tDate} rows=${campaigns.length} ${Date.now() - startedAt}ms`);
+    res.json(setReadCache(cacheKey, campaigns));
+  } catch (error) {
+    console.error(`[campaigns:today] failed after ${Date.now() - startedAt}ms: ${error.message}`);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+async function fetchAccountInsightsInRange(account, fromDate, toDate) {
+  const { fbToken } = await getEffectiveSecrets(account);
+  if (!fbToken) throw new Error('Thieu Facebook Access Token');
+
+  const acctId = account.adAccountId.startsWith('act_')
+    ? account.adAccountId
+    : `act_${account.adAccountId}`;
+
+  const { items } = await fetchAllFbEdge(fbToken, `${acctId}/insights`, {
+    fields: 'campaign_id,campaign_name,spend,impressions,clicks,actions',
+    time_range: JSON.stringify({ since: fromDate, until: toDate }),
+    level: 'campaign',
+    limit: 500,
+    time_increment: 1
+  });
+
+  return items;
+}
+
+async function syncAccountHistoricalData(account, fromDate, toDate, options = {}) {
+  const insights = await fetchAccountInsightsInRange(account, fromDate, toDate);
+  let count = 0;
+  const seenByDate = new Map();
+
+  for (const insight of insights) {
+    const date = insight.date_start;
+    if (!date || !insight.campaign_id) continue;
+    if (!seenByDate.has(date)) seenByDate.set(date, new Set());
+    seenByDate.get(date).add(String(insight.campaign_id));
+
+    const spend = parseFloat(insight.spend || 0);
+    const impressions = parseInt(insight.impressions || 0, 10);
+    const clicks = parseInt(insight.clicks || 0, 10);
+    const actions = insight.actions || [];
+    const msgAction = actions.find(action =>
+      action.action_type === 'onsite_conversion.messaging_conversation_started_7d' ||
+      action.action_type === 'onsite_conversion.total_messaging_connection' ||
+      action.action_type === 'omni_initiated_conversation'
+    );
+    const messages = parseInt(msgAction?.value || 0, 10);
+    const costPerMessage = messages > 0 ? spend / messages : 0;
+
+    await upsertDailyCampaign(account._id, insight.campaign_id, date, {
+      name: insight.campaign_name,
+      spend,
+      impressions,
+      clicks,
+      messages,
+      costPerMessage
+    });
+    count++;
+  }
+
+  if (options.prune === true && fromDate === toDate) {
+    const seenCampaignIds = [...(seenByDate.get(fromDate) || new Set())];
+    const pruneFilter = {
+      accountId: account._id,
+      date: fromDate
+    };
+    if (seenCampaignIds.length) {
+      pruneFilter.campaignId = { $nin: seenCampaignIds };
+    }
+    const result = await Campaign.deleteMany(pruneFilter);
+    if (result.deletedCount) {
+      await addLog(account._id, account.name, 'info', `Chot ngay ${fromDate}: xoa ${result.deletedCount} camp cu khong con trong snapshot`);
+    }
+  }
+
+  return count;
+}
+
+let finalSpendSyncRunning = false;
+const syncHistoryJobs = new Map();
+
+function createSyncHistoryJobId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getDateKeysInRange(fromDate, toDate) {
+  const start = new Date(`${fromDate}T00:00:00Z`);
+  const end = new Date(`${toDate}T00:00:00Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || start > end) {
+    throw new Error('Khoang ngay khong hop le');
+  }
+
+  const dates = [];
+  for (let cursor = start; cursor <= end; cursor = new Date(cursor.getTime() + 24 * 60 * 60 * 1000)) {
+    dates.push(cursor.toISOString().split('T')[0]);
+  }
+  return dates;
+}
+
+function setSyncHistoryJob(jobId, updates) {
+  const current = syncHistoryJobs.get(jobId);
+  if (!current) return null;
+  const next = { ...current, ...updates, updatedAt: new Date().toISOString() };
+  syncHistoryJobs.set(jobId, next);
+  return next;
+}
+
+async function runSyncHistoryJob(jobId, { fromDate, toDate, provider, accountId }) {
+  try {
+    const job = syncHistoryJobs.get(jobId);
+    if (!job) return;
+
+    const filter = {
+      _id: accountId,
+      ...(provider ? buildAccountProviderFilter(provider) : {})
+    };
+    const account = await Account.findOne(filter);
+    if (!account) throw new Error('Khong tim thay tai khoan can dong bo');
+    if (account.provider === 'shopee') throw new Error('Shopee khong can dong bo Meta insights');
+
+    const dates = getDateKeysInRange(fromDate, toDate);
+    setSyncHistoryJob(jobId, {
+      state: 'active',
+      accountName: account.name,
+      totalDays: dates.length,
+      currentDay: '',
+      message: 'Đang Đồng Bộ'
+    });
+
+    let syncedRows = 0;
+    const errors = [];
+
+    for (let index = 0; index < dates.length; index += 1) {
+      const dateKey = dates[index];
+      setSyncHistoryJob(jobId, {
+        currentDay: dateKey,
+        completedDays: index,
+        percent: Math.round((index / dates.length) * 100)
+      });
+
+      try {
+        const count = await syncAccountHistoricalData(account, dateKey, dateKey);
+        syncedRows += count;
+        await addLog(account._id, account.name, 'success', `Dong bo ngay ${dateKey}: ${count} camp`);
+      } catch (error) {
+        errors.push({ date: dateKey, error: error.message });
+        await addLog(account._id, account.name, 'error', `Loi dong bo ngay ${dateKey}: ${error.message}`);
+      }
+
+      if (index < dates.length - 1) {
+        await sleep(300);
+      }
+    }
+
+    setSyncHistoryJob(jobId, {
+      state: errors.length ? 'completed_with_errors' : 'completed',
+      completedDays: dates.length,
+      percent: 100,
+      syncedRows,
+      errors,
+      currentDay: '',
+      finishedAt: new Date().toISOString(),
+      message: errors.length ? 'Dong bo xong nhung co loi' : 'Dong bo xong'
+    });
+    setTimeout(() => syncHistoryJobs.delete(jobId), 60 * 60 * 1000);
+  } catch (error) {
+    setSyncHistoryJob(jobId, {
+      state: 'failed',
+      error: error.message,
+      finishedAt: new Date().toISOString(),
+      message: error.message
+    });
+    setTimeout(() => syncHistoryJobs.delete(jobId), 60 * 60 * 1000);
+  }
+}
+
+async function processCampaignSyncHistoryJob(data = {}, onProgress = null) {
+  const { fromDate, toDate, provider, accountId } = data;
+  const filter = {
+    _id: accountId,
+    ...(provider ? buildAccountProviderFilter(provider) : {})
+  };
+  const account = await Account.findOne(filter);
+  if (!account) throw new Error('Khong tim thay tai khoan can dong bo');
+  if (account.provider === 'shopee') throw new Error('Shopee khong can dong bo Meta insights');
+
+  const dates = getDateKeysInRange(fromDate, toDate);
+  const baseProgress = {
+    state: 'active',
+    accountId: String(account._id),
+    accountName: account.name,
+    fromDate,
+    toDate,
+    totalDays: dates.length,
+    completedDays: 0,
+    currentDay: '',
+    percent: 0,
+    syncedRows: 0,
+    errors: [],
+    message: 'Đang Đồng Bộ'
+  };
+
+  if (onProgress) await onProgress(baseProgress);
+
+  let syncedRows = 0;
+  const errors = [];
+
+  for (let index = 0; index < dates.length; index += 1) {
+    const dateKey = dates[index];
+    if (onProgress) {
+      await onProgress({
+        ...baseProgress,
+        syncedRows,
+        errors,
+        currentDay: dateKey,
+        completedDays: index,
+        percent: Math.round((index / dates.length) * 100)
+      });
+    }
+
+    try {
+      const count = await syncAccountHistoricalData(account, dateKey, dateKey);
+      syncedRows += count;
+      await addLog(account._id, account.name, 'success', `Dong bo ngay ${dateKey}: ${count} camp`);
+    } catch (error) {
+      errors.push({ date: dateKey, error: error.message });
+      await addLog(account._id, account.name, 'error', `Loi dong bo ngay ${dateKey}: ${error.message}`);
+    }
+
+    if (index < dates.length - 1 && CAMPAIGN_SYNC_DAY_DELAY_MS > 0) {
+      await sleep(CAMPAIGN_SYNC_DAY_DELAY_MS);
+    }
+  }
+
+  const result = {
+    state: errors.length ? 'completed_with_errors' : 'completed',
+    accountId: String(account._id),
+    accountName: account.name,
+    fromDate,
+    toDate,
+    totalDays: dates.length,
+    completedDays: dates.length,
+    currentDay: '',
+    percent: 100,
+    syncedRows,
+    errors,
+    message: errors.length ? 'Dong bo xong nhung co loi' : 'Dong bo xong',
+    finishedAt: new Date().toISOString()
+  };
+
+  if (onProgress) await onProgress(result);
+  return result;
+}
+
+async function syncFinalSpendForDate(dateKey = dateKeyFromVnOffset(-1)) {
+  if (finalSpendSyncRunning) {
+    console.log(`Final spend sync skipped for ${dateKey}: previous run still active`);
+    return { skipped: true, date: dateKey };
+  }
+
+  finalSpendSyncRunning = true;
+  let syncedAccounts = 0;
+  let failedAccounts = 0;
+  let syncedRows = 0;
+
+  try {
+    const accounts = await Account.find(buildAccountProviderFilter('facebook'));
+    console.log(`Final spend sync: closing ${dateKey} for ${accounts.length} Facebook accounts`);
+
+    for (const account of accounts) {
+      try {
+        const count = await syncAccountHistoricalData(account, dateKey, dateKey, { prune: true });
+        syncedRows += count;
+        syncedAccounts += 1;
+        await addLog(account._id, account.name, 'success', `Chot chi tieu ngay ${dateKey}: ${count} camp`);
+      } catch (error) {
+        failedAccounts += 1;
+        await addLog(account._id, account.name, 'error', `Loi chot chi tieu ngay ${dateKey}: ${error.message}`);
+      }
+    }
+
+    console.log(`Final spend sync finished for ${dateKey}: accounts=${syncedAccounts}, rows=${syncedRows}, failed=${failedAccounts}`);
+    return { ok: true, date: dateKey, syncedAccounts, failedAccounts, syncedRows };
+  } finally {
+    finalSpendSyncRunning = false;
+  }
+}
+
+function startFinalSpendCron() {
+  if (!cron.validate(FINAL_SPEND_CRON)) {
+    console.warn(`Invalid FINAL_SPEND_CRON "${FINAL_SPEND_CRON}", final spend cron disabled`);
+    return null;
+  }
+
+  const task = cron.schedule(FINAL_SPEND_CRON, async () => {
+    try {
+      await syncFinalSpendForDate(dateKeyFromVnOffset(-1));
+    } catch (error) {
+      console.error(`Final spend cron failed: ${error.message}`);
+    }
+  }, { timezone: FINAL_SPEND_TIMEZONE });
+
+  console.log(`Final spend cron scheduled: ${FINAL_SPEND_CRON} (${FINAL_SPEND_TIMEZONE})`);
+  return task;
+}
+
+app.post('/api/campaigns/sync-history', async (req, res) => {
+  try {
+    const { fromDate, toDate, provider, accountId } = req.body;
+    if (!fromDate || !toDate) {
+      return res.status(400).json({ error: 'Thieu fromDate hoac toDate' });
+    }
+    if (!accountId || !mongoose.Types.ObjectId.isValid(accountId)) {
+      return res.status(400).json({ error: 'Chon 1 tai khoan truoc khi dong bo' });
+    }
+
+    const dates = getDateKeysInRange(fromDate, toDate);
+    if (!campaignSyncQueue) {
+      return res.status(503).json({ error: 'Redis/BullMQ queue chua duoc bat. Cau hinh REDIS_URL hoac REDIS_QUEUE_ENABLED=true.' });
+    }
+
+    const job = await campaignSyncQueue.add('sync-history', {
+      fromDate,
+      toDate,
+      provider: normalizeProvider(provider),
+      accountId,
+      totalDays: dates.length
+    });
+    startCampaignSyncWorker();
+
+    res.status(202).json({
+      ok: true,
+      queued: true,
+      queue: CAMPAIGN_SYNC_QUEUE_NAME,
+      jobId: String(job.id),
+      statusUrl: `/api/campaigns/sync-history/${job.id}`,
+      message: 'Đang Đồng Bộ Trong Nền'
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get('/api/campaigns/sync-history/:jobId', async (req, res) => {
+  try {
+    if (!campaignSyncQueue) {
+      return res.status(404).json({ error: 'Campaign sync queue is not enabled' });
+    }
+
+    const job = await campaignSyncQueue.getJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Khong tim thay job dong bo' });
+
+    const state = await job.getState();
+    const progress = typeof job.progress === 'object' && job.progress !== null ? job.progress : {};
+    const returnvalue = job.returnvalue || {};
+    const failedJob = state === 'failed';
+    const payload = {
+      id: String(job.id),
+      state: failedJob ? 'failed' : (returnvalue.state || progress.state || state),
+      accountId: progress.accountId || returnvalue.accountId || job.data.accountId,
+      accountName: progress.accountName || returnvalue.accountName || '',
+      fromDate: progress.fromDate || returnvalue.fromDate || job.data.fromDate,
+      toDate: progress.toDate || returnvalue.toDate || job.data.toDate,
+      totalDays: progress.totalDays || returnvalue.totalDays || job.data.totalDays || 0,
+      completedDays: progress.completedDays || returnvalue.completedDays || 0,
+      currentDay: progress.currentDay || returnvalue.currentDay || '',
+      percent: progress.percent || returnvalue.percent || 0,
+      syncedRows: progress.syncedRows || returnvalue.syncedRows || 0,
+      errors: progress.errors || returnvalue.errors || [],
+      message: failedJob ? (job.failedReason || 'Dong bo loi') : (progress.message || returnvalue.message || state),
+      error: failedJob ? job.failedReason : '',
+      attemptsMade: job.attemptsMade,
+      createdAt: job.timestamp ? new Date(job.timestamp).toISOString() : '',
+      processedOn: job.processedOn ? new Date(job.processedOn).toISOString() : '',
+      finishedAt: job.finishedOn ? new Date(job.finishedOn).toISOString() : (returnvalue.finishedAt || '')
+    };
+
+    res.json({ ok: true, job: payload });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post('/api/campaigns/finalize-day', async (req, res) => {
+  try {
+    const dateKey = normalizeCampaignDate(req.body.date || dateKeyFromVnOffset(-1));
+    const result = await syncFinalSpendForDate(dateKey);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/reports/export-spending', async (req, res) => {
+  try {
+    const { fromDate, toDate, provider } = req.query;
+    if (!fromDate || !toDate) {
+      return res.status(400).json({ error: 'Thieu fromDate hoac toDate' });
+    }
+
+    const filter = {
+      date: { $gte: fromDate, $lte: toDate }
+    };
+
+    if (provider) {
+      const accounts = await Account.find(buildAccountProviderFilter(provider)).select('_id');
+      const accountIds = accounts.map(a => a._id);
+      filter.accountId = { $in: accountIds };
+    }
+
+    const campaigns = await Campaign.find(filter)
+      .populate('accountId', 'name adAccountId')
+      .sort({ date: 1, spend: -1 })
+      .lean();
+
+    if (!campaigns.length) {
+      return res.status(404).json({ error: 'Khong co du lieu trong khoang thoi gian nay' });
+    }
+
+    const rows = campaigns.map(c => ({
+      'Ngay': c.date,
+      'ID TKQC': c.accountId?.adAccountId || 'N/A',
+      'Ten TKQC': c.accountId?.name || 'N/A',
+      'ID Campaign': c.campaignId,
+      'Ten Campaign': c.name,
+      'Chi tieu': c.spend,
+      'Tin nhan': c.messages,
+      'Gia/TN': c.costPerMessage,
+      'Clicks': c.clicks,
+      'Hien thi': c.impressions
+    }));
+
+    const header = Object.keys(rows[0]).join(',');
+    const csvContent = rows.map(row =>
+      Object.values(row).map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')
+    ).join('\n');
+
+    const csv = `\ufeff${header}\n${csvContent}`; // BOM for UTF-8 Excel support
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename=spending_report_${fromDate}_to_${toDate}.csv`);
+    res.status(200).send(csv);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.get('/api/logs', async (req, res) => {
-  const { accountId, limit = 100 } = req.query;
-  const query = accountId ? { accountId } : {};
-  const safeLimit = parseBoundedInt(limit, 100, 1, 500);
-  const logs = await Log.find(query).sort('-createdAt').limit(safeLimit).lean();
-  res.json(logs);
+  try {
+    const { accountId, limit = 100 } = req.query;
+    const query = accountId ? { accountId } : {};
+    const safeLimit = parseBoundedInt(limit, 100, 1, 500);
+    const logs = await Log.find(query).sort('-createdAt').limit(safeLimit).lean();
+    res.json(logs);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.delete('/api/logs', async (req, res) => {
-  const { accountId } = req.query;
-  const query = accountId ? { accountId } : {};
-  await Log.deleteMany(query);
-  res.json({ ok: true });
+  try {
+    const { accountId } = req.query;
+    const query = accountId ? { accountId } : {};
+    await Log.deleteMany(query);
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.post('/api/test-token', async (req, res) => {
@@ -1751,13 +3358,13 @@ app.post('/api/webhooks/pancake', async (req, res) => {
   try {
     const payload = req.body;
     console.log('Received Pancake Webhook payload:', JSON.stringify(payload, null, 2));
-    
+
     // Pancake webhook structure usually has event type and data
     // Fallback to simple extraction if exact structure is unknown
     const orderData = payload.data || payload || {};
     const orderId = orderData.id || orderData.order_id || `temp_${Date.now()}`;
     const status = orderData.status || payload.event || 'unknown';
-    
+
     const newOrder = await Order.findOneAndUpdate(
       { orderId: String(orderId) },
       {
@@ -1779,12 +3386,49 @@ app.post('/api/webhooks/pancake', async (req, res) => {
 
 app.get('/api/orders', async (req, res) => {
   try {
-    const { limit = 100, fromDate, toDate } = req.query;
-    const safeLimit = parseBoundedInt(limit, 100, 1, 5000);
-    const orders = await Order.find(buildOrderQuery({ fromDate, toDate }))
+    const { fromDate, toDate } = req.query;
+    const page = parseBoundedInt(req.query.page, 1, 1, 100000);
+    const limit = parseBoundedInt(req.query.limit, 100, 1, 1000);
+    const wantsPaged = req.query.page !== undefined || req.query.limit !== undefined;
+
+    if (useSheetOrders()) {
+      const orders = await getOrderSheetOrders({ fromDate, toDate });
+      if (wantsPaged) {
+        const total = orders.length;
+        const start = (page - 1) * limit;
+        res.json({
+          ok: true,
+          orders: orders.slice(start, start + limit),
+          total,
+          page,
+          limit,
+          totalPages: Math.ceil(total / limit) || 1
+        });
+        return;
+      }
+      res.json(orders);
+      return;
+    }
+
+    const query = buildOrderQuery({ fromDate, toDate });
+    if (wantsPaged) {
+      const [orders, total] = await Promise.all([
+        Order.find(query)
+          .select('orderId status rawData createdAt')
+          .sort('-createdAt')
+          .skip((page - 1) * limit)
+          .limit(limit)
+          .lean(),
+        Order.countDocuments(query)
+      ]);
+      res.json({ ok: true, orders, total, page, limit, totalPages: Math.ceil(total / limit) || 1 });
+      return;
+    }
+
+    const orders = await Order.find(query)
       .select('orderId status rawData createdAt')
       .sort('-createdAt')
-      .limit(safeLimit)
+      .limit(200000)
       .lean();
     res.json(orders);
   } catch (error) {
@@ -1796,405 +3440,114 @@ app.get('/api/orders/sku-counts', async (req, res) => {
   try {
     const fromDate = req.query.fromDate || todayStr();
     const { toDate } = req.query;
-    const orders = await Order.find(buildOrderQuery({ fromDate, toDate }))
-      .select('rawData')
-      .lean();
-    const counts = {};
+    const cacheKey = useSheetOrders() ? getOrderStatsCacheKey({ fromDate, toDate }) : '';
 
-    for (const order of orders) {
-      const orderSkus = new Set();
-      for (const item of getOrderItemsFromRaw(order.rawData || {})) {
-        const sku = normalizeSkuKey(getOrderItemSku(item));
-        if (!sku) continue;
-        orderSkus.add(sku);
-      }
-      for (const sku of orderSkus) {
-        counts[sku] = (counts[sku] || 0) + 1;
+    if (cacheKey && orderStatsCache.has(cacheKey)) {
+      res.json({ ok: true, ...orderStatsCache.get(cacheKey), cached: true });
+      return;
+    }
+
+    const allOrders = useSheetOrders()
+      ? await getOrderSheetOrders({ fromDate, toDate, limit: 200000 })
+      : await Order.find(buildOrderQuery({ fromDate, toDate })).select('rawData orderId status').lean();
+
+    const stats = buildOrderSkuStats(allOrders);
+    if (cacheKey) {
+      orderStatsCache.set(cacheKey, stats);
+      if (orderStatsCache.size > 50) {
+        const oldestKey = orderStatsCache.keys().next().value;
+        orderStatsCache.delete(oldestKey);
       }
     }
 
-    res.json({ ok: true, counts, totalOrders: orders.length });
+    res.json({ ok: true, ...stats });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-async function syncOrdersFromPancake(fromDate, toDate = null) {
-  const config = await getAppConfig();
-  if (!config || !config.pancakeApiKey || !config.pancakeShopId) {
-    throw new Error('Chưa cấu hình API Key hoặc Shop ID của Pancake POS');
-  }
-
-  let synced = 0;
-  const targetDateStr = fromDate ? `${fromDate}T00:00:00Z` : '2026-02-22T00:00:00Z';
-  const targetFromDateRaw = new Date(targetDateStr);
-  const targetFromDate = new Date(targetFromDateRaw.getTime() - 7 * 60 * 60 * 1000);
-  
-  let targetToDate = null;
-  if (toDate) {
-    const d = new Date(`${toDate}T23:59:59Z`);
-    targetToDate = new Date(d.getTime() - 7 * 60 * 60 * 1000);
-  }
-
-  let page = 1;
-  let keepFetching = true;
-
-  while (keepFetching) {
-    const response = await axios.get(`https://pos.pages.fm/api/v1/shops/${config.pancakeShopId}/orders`, {
-      params: { api_key: config.pancakeApiKey, page_number: page, page: page }
-    });
-
-    const ordersData = response.data.data || [];
-    if (ordersData.length === 0) break;
-
-    const operations = [];
-    for (const order of ordersData) {
-      const orderDate = new Date(order.inserted_at || order.created_at || Date.now());
-      
-      if (orderDate < targetFromDate) {
-        keepFetching = false;
-      }
-
-      if (targetToDate && orderDate > targetToDate) {
-        continue;
-      }
-
-      if (orderDate >= targetFromDate && (!targetToDate || orderDate <= targetToDate)) {
-        operations.push({
-          updateOne: {
-            filter: { orderId: String(order.id) },
-            update: {
-              $set: {
-                status: String(order.status || 'unknown'),
-                customerName: order.customer_name || order.bill_full_name || '',
-                totalPrice: Number(order.total_price || 0),
-                rawData: order,
-                createdAt: orderDate
-              }
-            },
-            upsert: true
-          }
-        });
-        synced++;
-      }
-    }
-
-    if (operations.length) {
-      await Order.bulkWrite(operations, { ordered: false });
-    }
-
-    page++;
-    if (page > 200) keepFetching = false;
-  }
-  return synced;
-}
+// ── Đồng bộ đơn hàng từ Google Sheet ──
 
 app.post('/api/orders/sync', async (req, res) => {
   try {
     const { fromDate, toDate } = req.body;
-    const synced = await syncOrdersFromPancake(fromDate, toDate);
-    res.json({ success: true, synced });
+    if (orderSheetSyncQueue) {
+      const job = await orderSheetSyncQueue.add('sync-sheet', { fromDate, toDate });
+      return res.status(202).json({
+        ok: true,
+        queued: true,
+        queue: ORDER_SHEET_SYNC_QUEUE_NAME,
+        jobId: String(job.id),
+        statusUrl: `/api/orders/sync/${job.id}`,
+        message: 'Dang tai don hang trong nen'
+      });
+    }
+
+    const rows = await fetchOrderSheetRows({ refresh: true });
+    const orders = rows
+      .filter(row => {
+        if (fromDate && row.dateKey < fromDate) return false;
+        if (toDate && row.dateKey > toDate) return false;
+        return true;
+      })
+      .map(({ dateKey, ...order }) => order);
+    res.json({ success: true, synced: orders.length, source: 'google_sheet', cachedAt: new Date().toISOString() });
   } catch (error) {
-    console.error('Lỗi đồng bộ Pancake API:', error.response?.data || error.message);
-    res.status(500).json({ error: error.response?.data?.message || error.message });
+    console.error('Lỗi tải đơn từ Google Sheet:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/orders/sync/:jobId', async (req, res) => {
+  try {
+    if (!orderSheetSyncQueue) {
+      return res.status(404).json({ error: 'Order sheet sync queue is not enabled' });
+    }
+
+    const job = await orderSheetSyncQueue.getJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Khong tim thay job tai don hang' });
+
+    const state = await job.getState();
+    const progress = typeof job.progress === 'object' && job.progress !== null ? job.progress : {};
+    const returnvalue = job.returnvalue || {};
+    const failedJob = state === 'failed';
+    const payload = {
+      id: String(job.id),
+      state: failedJob ? 'failed' : (returnvalue.state || progress.state || state),
+      source: returnvalue.source || progress.source || 'google_sheet',
+      fromDate: returnvalue.fromDate || progress.fromDate || job.data.fromDate || '',
+      toDate: returnvalue.toDate || progress.toDate || job.data.toDate || '',
+      totalRows: returnvalue.totalRows || progress.totalRows || 0,
+      synced: returnvalue.synced || progress.synced || 0,
+      percent: returnvalue.percent || progress.percent || 0,
+      message: failedJob ? (job.failedReason || 'Tai don hang loi') : (returnvalue.message || progress.message || state),
+      error: failedJob ? job.failedReason : '',
+      attemptsMade: job.attemptsMade,
+      createdAt: job.timestamp ? new Date(job.timestamp).toISOString() : '',
+      processedOn: job.processedOn ? new Date(job.processedOn).toISOString() : '',
+      finishedAt: job.finishedOn ? new Date(job.finishedOn).toISOString() : (returnvalue.cachedAt || '')
+    };
+
+    res.json({ ok: true, job: payload });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
   }
 });
 
 // ── Pages & Posts (for campaign creation) ──
 
-const POST_CACHE_TTL_MS = 5 * 60 * 1000;
-const postCache = new Map();
-
-function parseBoundedInt(value, fallback, min, max) {
-  const parsed = parseInt(value, 10);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(max, Math.max(min, parsed));
-}
-
-function getPostCache(key, refresh = false) {
-  if (refresh) return null;
-  const cached = postCache.get(key);
-  if (!cached) return null;
-  if (Date.now() - cached.createdAt > POST_CACHE_TTL_MS) {
-    postCache.delete(key);
-    return null;
-  }
-  return cached.value;
-}
-
-function setPostCache(key, value) {
-  postCache.set(key, { value, createdAt: Date.now() });
-  return value;
-}
-
-function mapFacebookPost(post, page = {}) {
-  return {
-    id: post.id,
-    message: post.message || '',
-    createdTime: post.created_time,
-    permalink: post.permalink_url,
-    picture: post.full_picture || '',
-    shares: post.shares?.count || 0,
-    likes: post.likes?.summary?.total_count || 0,
-    comments: post.comments?.summary?.total_count || 0,
-    pageName: page.name || '',
-    pageId: page.id || '',
-    pageAvatar: page.picture?.data?.url || ''
-  };
-}
-
-function mapSavedFacebookPost(post = {}) {
-  return {
-    id: post.postId,
-    message: post.message || '',
-    createdTime: post.createdTime,
-    permalink: post.permalink || '',
-    picture: post.picture || '',
-    shares: post.shares || 0,
-    likes: post.likes || 0,
-    comments: post.comments || 0,
-    pageName: post.pageName || '',
-    pageId: post.pageId || '',
-    pageAvatar: post.pageAvatar || ''
-  };
-}
-
-async function saveFacebookPosts(mappedPosts, rawPosts = []) {
-  const posts = (mappedPosts || []).filter(post => post.id);
-  if (!posts.length) return;
-
-  const now = new Date();
-  const operations = posts.map((post, index) => ({
-    updateOne: {
-      filter: { postId: post.id },
-      update: {
-        $set: {
-          pageId: post.pageId || '',
-          pageName: post.pageName || '',
-          pageAvatar: post.pageAvatar || '',
-          message: post.message || '',
-          createdTime: post.createdTime ? new Date(post.createdTime) : null,
-          permalink: post.permalink || '',
-          picture: post.picture || '',
-          shares: Number(post.shares || 0),
-          likes: Number(post.likes || 0),
-          comments: Number(post.comments || 0),
-          rawData: rawPosts[index] || {},
-          fetchedAt: now,
-          updatedAt: now
-        },
-        $setOnInsert: { createdAt: now }
-      },
-      upsert: true
-    }
-  }));
-
-  try {
-    await FacebookPost.bulkWrite(operations, { ordered: false });
-  } catch (error) {
-    console.error('Save Facebook posts failed:', error.message);
-  }
-}
-
-async function fetchRecentPostsForPage(page, fallbackToken, options = {}) {
-  const token = page.access_token || fallbackToken;
-  const limit = parseBoundedInt(options.limit, POSTS_PER_PAGE_LIMIT, 1, POSTS_PER_PAGE_LIMIT);
-  const maxPages = parseBoundedInt(options.maxPages, 4, 1, 5);
-  const requestLimit = Math.min(limit, META_POST_REQUEST_LIMIT);
-  const fields = 'id,message,created_time,permalink_url,full_picture,shares,likes.summary(true),comments.summary(true)';
-  let posts = [];
-
-  const first = await fbGet(token, `${page.id}/posts`, { fields, limit: requestLimit });
-  if (first.data) posts = posts.concat(first.data);
-
-  let fetchedPages = 1;
-  let nextUrl = first.paging?.next;
-  while (nextUrl && fetchedPages < maxPages && posts.length < limit) {
-    const resp = await axios.get(nextUrl);
-    if (resp.data?.data) posts = posts.concat(resp.data.data);
-    nextUrl = resp.data?.paging?.next || null;
-    fetchedPages += 1;
-  }
-
-  const limitedPosts = posts.slice(0, limit);
-  const mappedPosts = limitedPosts.map(post => mapFacebookPost(post, page));
-  await saveFacebookPosts(mappedPosts, limitedPosts);
-  return mappedPosts;
-}
-
-async function mapInBatches(items, batchSize, iteratee) {
-  const results = [];
-  for (let i = 0; i < items.length; i += batchSize) {
-    const chunk = items.slice(i, i + batchSize);
-    const settled = await Promise.allSettled(chunk.map(iteratee));
-    results.push(...settled);
-  }
-  return results;
-}
-
-app.get('/api/pages', async (req, res) => {
-  try {
-    const config = await getAppConfig();
-    const fbToken = config?.fbToken;
-    if (!fbToken) return res.status(400).json({ error: 'Chưa cấu hình Facebook Token dùng chung' });
-
-    let allPages = [];
-    let url = 'me/accounts';
-    let params = { fields: 'name,id,access_token,category,picture{url},fan_count', limit: 100 };
-
-    // First page
-    const first = await fbGet(fbToken, url, params);
-    if (first.data) allPages = allPages.concat(first.data);
-
-    // Paginate
-    let nextUrl = first.paging?.next;
-    while (nextUrl) {
-      try {
-        const resp = await axios.get(nextUrl);
-        if (resp.data?.data) allPages = allPages.concat(resp.data.data);
-        nextUrl = resp.data?.paging?.next || null;
-      } catch {
-        break;
-      }
-    }
-
-    res.json({ ok: true, pages: allPages, total: allPages.length });
-  } catch (error) {
-    res.status(400).json({ error: error.message });
-  }
+registerPageRoutes(app, {
+  axios,
+  FacebookPost,
+  getAppConfig,
+  fbGet,
+  escapeRegExp,
+  normalizeProvider,
+  POSTS_PER_PAGE_LIMIT,
+  SHOPEE_POSTS_PER_PAGE_LIMIT,
+  ALL_POSTS_MAX_LIMIT,
+  META_POST_REQUEST_LIMIT
 });
-
-app.get('/api/posts/saved', async (req, res) => {
-  try {
-    const limit = parseBoundedInt(req.query.limit, 1000, 1, 5000);
-    const q = String(req.query.q || '').trim();
-    const pageId = String(req.query.pageId || '').trim();
-    const query = {};
-
-    if (pageId) query.pageId = pageId;
-    if (q) {
-      const pattern = new RegExp(escapeRegExp(q), 'i');
-      query.$or = [
-        { message: pattern },
-        { pageName: pattern },
-        { postId: pattern }
-      ];
-    }
-
-    const posts = await FacebookPost.find(query)
-      .sort({ createdTime: -1, fetchedAt: -1 })
-      .limit(limit)
-      .lean();
-
-    res.json({
-      ok: true,
-      posts: posts.map(mapSavedFacebookPost),
-      total: posts.length,
-      source: 'saved'
-    });
-  } catch (error) {
-    res.status(400).json({ error: error.message });
-  }
-});
-
-app.get('/api/pages/all-posts', async (req, res) => {
-  try {
-    const config = await getAppConfig();
-    const fbToken = config?.fbToken;
-    if (!fbToken) return res.status(400).json({ error: 'Missing shared Facebook Token' });
-    const perPage = parseBoundedInt(req.query.perPage, POSTS_PER_PAGE_LIMIT, 1, POSTS_PER_PAGE_LIMIT);
-    const totalLimit = parseBoundedInt(req.query.limit, 5000, 10, 5000);
-    const maxPages = parseBoundedInt(req.query.maxPages, 4, 1, 5);
-    const refresh = req.query.refresh === '1';
-    const cacheKey = `all-posts:${perPage}:${totalLimit}:${maxPages}`;
-    const cached = getPostCache(cacheKey, refresh);
-    if (cached) {
-      return res.json({ ...cached, cached: true });
-    }
-    if (!fbToken) return res.status(400).json({ error: 'Chưa cấu hình Facebook Token dùng chung' });
-
-    // 1. Get all pages
-    let allPages = [];
-    const first = await fbGet(fbToken, 'me/accounts', {
-      fields: 'name,id,access_token,picture{url}',
-      limit: 100
-    });
-    if (first.data) allPages = allPages.concat(first.data);
-    let nextPageUrl = first.paging?.next;
-    while (nextPageUrl) {
-      try {
-        const resp = await axios.get(nextPageUrl);
-        if (resp.data?.data) allPages = allPages.concat(resp.data.data);
-        nextPageUrl = resp.data?.paging?.next || null;
-      } catch { break; }
-    }
-
-    const results = await mapInBatches(
-      allPages,
-      6,
-      page => fetchRecentPostsForPage(page, fbToken, { limit: perPage, maxPages })
-    );
-
-    let allPosts = [];
-    for (const r of results) {
-      if (r.status === 'fulfilled') allPosts = allPosts.concat(r.value);
-    }
-    // Sort by date descending
-    allPosts.sort((a, b) => new Date(b.createdTime) - new Date(a.createdTime));
-    allPosts = allPosts.slice(0, totalLimit);
-
-    const payload = {
-      ok: true,
-      posts: allPosts,
-      total: allPosts.length,
-      pageCount: allPages.length,
-      perPage,
-      maxPages
-    };
-
-    res.json(setPostCache(cacheKey, payload));
-  } catch (error) {
-    res.status(400).json({ error: error.message });
-  }
-});
-
-app.get('/api/pages/:pageId/posts', async (req, res) => {
-  try {
-    const config = await getAppConfig();
-    const fbToken = config?.fbToken;
-    if (!fbToken) return res.status(400).json({ error: 'Chưa cấu hình Facebook Token dùng chung' });
-
-    const { pageId } = req.params;
-    const limit = parseBoundedInt(req.query.limit, POSTS_PER_PAGE_LIMIT, 1, POSTS_PER_PAGE_LIMIT);
-    const maxPages = parseBoundedInt(req.query.maxPages, 4, 1, 5);
-    const refresh = req.query.refresh === '1';
-    const cacheKey = `page-posts:${pageId}:${limit}:${maxPages}`;
-    const cached = getPostCache(cacheKey, refresh);
-    if (cached) {
-      return res.json({ ...cached, cached: true });
-    }
-
-    // First get the page access token
-    let pageToken = fbToken;
-    let pageInfo = { id: pageId };
-    try {
-      pageInfo = await fbGet(fbToken, pageId, { fields: 'name,id,access_token,picture{url}' });
-      if (pageInfo.access_token) pageToken = pageInfo.access_token;
-    } catch {}
-
-    const posts = await fetchRecentPostsForPage(
-      { ...pageInfo, id: pageId, access_token: pageToken },
-      fbToken,
-      { limit, maxPages }
-    );
-    const payload = { ok: true, posts, total: posts.length, limit, maxPages };
-
-    res.json(setPostCache(cacheKey, payload));
-  } catch (error) {
-    res.status(400).json({ error: error.message });
-  }
-});
-
 async function cleanupCampaignDailyDuplicates() {
   const duplicateGroups = await Campaign.aggregate([
     { $match: { date: { $type: 'string' } } },
@@ -2231,6 +3584,23 @@ async function ensureCampaignDailyStorage() {
   console.log('Campaign daily indexes ready');
 }
 
+async function migrateLegacyAccountProviders() {
+  const result = await Account.updateMany(
+    {
+      $or: [
+        { provider: { $exists: false } },
+        { provider: null },
+        { provider: '' }
+      ]
+    },
+    { $set: { provider: 'facebook' } }
+  );
+
+  if (result.modifiedCount) {
+    console.log(`Migrated ${result.modifiedCount} legacy accounts to provider=facebook`);
+  }
+}
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(publicDir, 'index.html'));
 });
@@ -2238,61 +3608,131 @@ app.get('*', (req, res) => {
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/fb_ads_manager';
 const PORT = process.env.PORT || 3000;
 
-mongoose.connect(MONGO_URI).then(async () => {
+mongoose.connect(MONGO_URI).then(() => {
   console.log('MongoDB connected');
-  await ensureCampaignDailyStorage();
-  try {
-    await bootstrapFacebookTokenFromEnv();
-  } catch (error) {
-    await sendTokenAlert('Facebook token environment bootstrap failed', { error: error.message });
-  }
-  checkAndRefreshFacebookToken({ source: 'startup' }).catch(error => {
-    console.error(`Facebook token startup check failed: ${error.message}`);
-  });
-  facebookTokenCronTask = startFacebookTokenCron();
-
-  const autoAccounts = await Account.find({ autoEnabled: true });
-  for (const account of autoAccounts) {
-    console.log(`Resuming auto for: ${account.name}`);
-    startAccountScheduler(account);
-  }
-
   app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
 
-  // Background Order Sync from Pancake (every 10 minutes)
-  setInterval(async () => {
-    if (backgroundOrderSyncRunning) return;
-    backgroundOrderSyncRunning = true;
+  (async () => {
     try {
-      console.log('Background Sync: Fetching orders from Pancake...');
-      // Sync last 3 days to be safe
-      const fromDate = new Date();
-      fromDate.setDate(fromDate.getDate() - 3);
-      const fromDateStr = fromDate.toISOString().split('T')[0];
-      
-      await syncOrdersFromPancake(fromDateStr);
-      console.log('Background Sync: Orders updated successfully.');
-    } catch (err) {
-      console.error('Background Order Sync failed:', err.message);
-    } finally {
-      backgroundOrderSyncRunning = false;
+      await migrateLegacyAccountProviders();
+      await ensureCampaignDailyStorage();
+    } catch (error) {
+      console.error(`Startup storage maintenance failed: ${error.message}`);
     }
-  }, 10 * 60 * 1000);
+
+    try {
+      await bootstrapFacebookTokenFromEnv();
+    } catch (error) {
+      await sendTokenAlert('Facebook token environment bootstrap failed', { error: error.message });
+    }
+
+    facebookTokenCronTask = startFacebookTokenCron();
+    finalSpendCronTask = startFinalSpendCron();
+    redisQueueAvailable = await checkRedisAvailable();
+    initCampaignDuplicateQueue();
+    initCampaignSyncQueue();
+    initOrderSheetSyncQueue();
+    startOrderSheetSyncWorker();
+
+    const autoAccounts = await Account.find({ autoEnabled: true });
+    for (const account of autoAccounts) {
+      console.log(`Resuming auto for: ${account.name}`);
+      startAccountScheduler(account);
+    }
+  })().catch(error => {
+    console.error(`Background startup failed: ${error.message}`);
+  });
+
+  // Background: Refresh cache đơn hàng từ Google Sheet mỗi 5 phút
+  let sheetRefreshRunning = false;
+  const sheetRefreshInitial = async () => {
+    try {
+      console.log('Sheet Cache: Khởi tạo cache đơn hàng từ Google Sheet...');
+      if (orderSheetSyncQueue) {
+        await orderSheetSyncQueue.add('sync-sheet', {}, { jobId: 'startup-order-sheet-sync' });
+      } else {
+        await fetchOrderSheetRows({ refresh: true });
+      }
+      console.log(`Sheet Cache: Đã tải ${ordersSheetCache.rows?.length || 0} dòng đơn hàng.`);
+    } catch (err) {
+      console.error('Sheet Cache: Lỗi tải lần đầu:', err.message);
+    }
+  };
+  sheetRefreshInitial();
+
+  sheetRefreshTimer = setInterval(async () => {
+    if (isShuttingDown || sheetRefreshRunning) return;
+    sheetRefreshRunning = true;
+    try {
+      console.log('Sheet Cache: Đang refresh đơn hàng từ Google Sheet...');
+      if (orderSheetSyncQueue) {
+        await orderSheetSyncQueue.add('sync-sheet', {}, {
+          jobId: `order-sheet-sync-${Math.floor(Date.now() / (5 * 60 * 1000))}`
+        });
+      } else {
+        await fetchOrderSheetRows({ refresh: true });
+      }
+      console.log(`Sheet Cache: Đã cập nhật ${ordersSheetCache.rows?.length || 0} dòng.`);
+    } catch (err) {
+      console.error('Sheet Cache: Lỗi refresh:', err.message);
+    } finally {
+      sheetRefreshRunning = false;
+    }
+  }, 5 * 60 * 1000);
 
 }).catch(error => {
   console.error('MongoDB error:', error.message);
   process.exit(1);
 });
 
-// Graceful shutdown
-process.on('SIGINT', async () => {
-  console.log('Shutting down gracefully...');
+async function gracefulShutdown(signal) {
+  console.log(`Shutting down gracefully (${signal})...`);
+  isShuttingDown = true;
   if (facebookTokenCronTask) {
     facebookTokenCronTask.stop();
   }
+  if (finalSpendCronTask) {
+    finalSpendCronTask.stop();
+  }
+  if (sheetRefreshTimer) {
+    clearInterval(sheetRefreshTimer);
+  }
+  if (campaignDuplicateWorker) {
+    await campaignDuplicateWorker.close();
+  }
+  if (campaignDuplicateQueue) {
+    await campaignDuplicateQueue.close();
+  }
+  if (campaignSyncWorker) {
+    await campaignSyncWorker.close();
+  }
+  if (campaignSyncQueue) {
+    await campaignSyncQueue.close();
+  }
+  if (orderSheetSyncWorker) {
+    await orderSheetSyncWorker.close();
+  }
+  if (orderSheetSyncQueue) {
+    await orderSheetSyncQueue.close();
+  }
+  await Promise.all(redisConnections.map(connection => connection.quit().catch(() => connection.disconnect())));
   for (const accountId in accountTimers) {
     stopAccountScheduler(accountId);
   }
+  const waitForRuns = Object.keys(accountRuns).length
+    ? new Promise(resolve => setTimeout(resolve, 1500))
+    : Promise.resolve();
+  await waitForRuns;
   await mongoose.connection.close();
   process.exit(0);
-});
+}
+
+process.once('SIGINT', () => gracefulShutdown('SIGINT').catch(error => {
+  console.error('Graceful shutdown failed:', error.message);
+  process.exit(1);
+}));
+
+process.once('SIGTERM', () => gracefulShutdown('SIGTERM').catch(error => {
+  console.error('Graceful shutdown failed:', error.message);
+  process.exit(1);
+}));

@@ -1,9 +1,8 @@
 import React, { useState } from 'react';
 import { useAppContext } from '../../contexts/AppContext';
 import { api } from '../../lib/api';
+import { isValidAdAccountId } from '../../lib/validators';
 import { toast } from 'react-toastify';
-
-const isValidAdAccountId = (value) => /^(act_)?\d+$/.test(String(value || '').trim());
 
 export default function BulkAddModal() {
   const { closeModal, loadAccounts } = useAppContext();

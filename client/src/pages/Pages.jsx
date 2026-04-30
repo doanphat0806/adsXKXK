@@ -3,27 +3,28 @@ import { api } from '../lib/api';
 import { useAppContext } from '../contexts/AppContext';
 import { toast } from 'react-toastify';
 
-const ALL_POSTS_LIMIT = 3000;
-const POSTS_PER_PAGE_PREVIEW = 40;
-const SELECTED_PAGE_POST_LIMIT = 120;
-const POST_RENDER_BATCH = 120;
+const SAVED_POSTS_LIMIT = 5000;
+const FB_REFRESH_POSTS_LIMIT = 1000;
+const FACEBOOK_POSTS_PER_PAGE_LIMIT = 150;
+const SHOPEE_POSTS_PER_PAGE_LIMIT = 200;
 const POSTS_AUTO_REFRESH_MS = 5 * 60 * 1000;
+const FACEBOOK_DEFAULT_DAILY_BUDGET = 300000;
+const FACEBOOK_DEFAULT_AGE_MIN = 18;
+const FACEBOOK_DEFAULT_AGE_MAX = 50;
+const SHOPEE_DEFAULT_DAILY_BUDGET = 50000;
+const SHOPEE_DEFAULT_BID_AMOUNT = 500;
+const SHOPEE_DEFAULT_AGE_MIN = 20;
+const SHOPEE_DEFAULT_AGE_MAX = 44;
 const AD_NAME_PREFIX_OPTIONS = ['PHAT', 'BINH', 'HIEU'];
 
 function getDefaultCampaignStartTime() {
-  const vnNow = new Date(Date.now() + 7 * 60 * 60 * 1000);
-  const start = new Date(Date.UTC(
-    vnNow.getUTCFullYear(),
-    vnNow.getUTCMonth(),
-    vnNow.getUTCDate() + 1,
-    6,
-    1,
-    0
-  ));
+  const start = new Date(Date.now() + 10 * 60 * 1000 + 7 * 60 * 60 * 1000);
   const yyyy = start.getUTCFullYear();
   const mm = String(start.getUTCMonth() + 1).padStart(2, '0');
   const dd = String(start.getUTCDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}T06:01`;
+  const hh = String(start.getUTCHours()).padStart(2, '0');
+  const mi = String(start.getUTCMinutes()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
 }
 
 function normalizeAccountQuery(value) {
@@ -49,8 +50,35 @@ function accountMatchesQuery(account, query) {
   return haystack.includes(normalizedQuery) || haystack.replace(/\s+/g, '').includes(compactQuery);
 }
 
+function getPostPageId(post = {}) {
+  const pageId = String(post.pageId || '').trim();
+  if (pageId) return pageId;
+
+  const postId = String(post.id || post.postId || '').trim();
+  if (postId.includes('_')) return postId.split('_')[0];
+  return '';
+}
+
+function formatCampaignCreateError(item) {
+  const details = [
+    item.objective,
+    item.destinationType,
+    item.optimizationGoal
+  ].filter(Boolean).join(' / ');
+
+  return details ? `${item.error} (${details})` : item.error;
+}
+
+function splitNonEmptyLines(value) {
+  return String(value || '')
+    .split(/\n+/)
+    .map(item => item.trim())
+    .filter(Boolean);
+}
+
 export default function CreateCampaign() {
-  const { allAccounts, loadTodayCampaigns } = useAppContext();
+  const { provider, allAccounts, loadTodayCampaigns } = useAppContext();
+  const isInitialShopeeProvider = provider === 'shopee';
   const [pages, setPages] = useState([]);
   const [loadingPages, setLoadingPages] = useState(false);
 
@@ -60,7 +88,7 @@ export default function CreateCampaign() {
   const [pagePostCache, setPagePostCache] = useState({});
   const [loadingAllPosts, setLoadingAllPosts] = useState(false);
   const [loadingPosts, setLoadingPosts] = useState(false);
-  const [visiblePostCount, setVisiblePostCount] = useState(POST_RENDER_BATCH);
+  const [visiblePostCount, setVisiblePostCount] = useState(FACEBOOK_POSTS_PER_PAGE_LIMIT);
 
   const [searchPage, setSearchPage] = useState('');
   const [searchPost, setSearchPost] = useState('');
@@ -69,10 +97,18 @@ export default function CreateCampaign() {
   const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
   const [adNamePrefix, setAdNamePrefix] = useState(AD_NAME_PREFIX_OPTIONS[0]);
   const [campaignCodes, setCampaignCodes] = useState('');
-  const [dailyBudget, setDailyBudget] = useState(300000);
+  const [campaignLinks, setCampaignLinks] = useState('');
+  const [dailyBudget, setDailyBudget] = useState(
+    isInitialShopeeProvider ? SHOPEE_DEFAULT_DAILY_BUDGET : FACEBOOK_DEFAULT_DAILY_BUDGET
+  );
+  const [bidAmount, setBidAmount] = useState(SHOPEE_DEFAULT_BID_AMOUNT);
   const [campaignStartTime, setCampaignStartTime] = useState(getDefaultCampaignStartTime);
-  const [ageMin, setAgeMin] = useState(22);
-  const [ageMax, setAgeMax] = useState(47);
+  const [ageMin, setAgeMin] = useState(
+    isInitialShopeeProvider ? SHOPEE_DEFAULT_AGE_MIN : FACEBOOK_DEFAULT_AGE_MIN
+  );
+  const [ageMax, setAgeMax] = useState(
+    isInitialShopeeProvider ? SHOPEE_DEFAULT_AGE_MAX : FACEBOOK_DEFAULT_AGE_MAX
+  );
   const [creatingCampaigns, setCreatingCampaigns] = useState(false);
   const [campaignCreateResult, setCampaignCreateResult] = useState(null);
   const allPostsLoadingRef = useRef(false);
@@ -88,6 +124,39 @@ export default function CreateCampaign() {
   const selectedAccount = useMemo(() => {
     return allAccounts.find(account => account._id === selectedAccountId) || null;
   }, [allAccounts, selectedAccountId]);
+  const selectedProvider = selectedAccount?.provider || provider || 'facebook';
+  const shopeeLinkedPageIds = useMemo(() => {
+    if (selectedProvider !== 'shopee') return [];
+    return [...new Set(
+      allAccounts
+        .filter(account => account.provider === 'shopee')
+        .flatMap(account => account.linkedPageIds || [])
+        .map(String)
+        .filter(Boolean)
+    )];
+  }, [allAccounts, selectedProvider]);
+  const shopeeLinkedPageIdSet = useMemo(
+    () => new Set(shopeeLinkedPageIds),
+    [shopeeLinkedPageIds]
+  );
+  const hasShopeePageScope = selectedProvider === 'shopee' && shopeeLinkedPageIds.length > 0;
+  const postsPerPageLimit = selectedProvider === 'shopee'
+    ? SHOPEE_POSTS_PER_PAGE_LIMIT
+    : FACEBOOK_POSTS_PER_PAGE_LIMIT;
+
+  useEffect(() => {
+    if (selectedProvider === 'shopee') {
+      setDailyBudget(SHOPEE_DEFAULT_DAILY_BUDGET);
+      setBidAmount(SHOPEE_DEFAULT_BID_AMOUNT);
+      setAgeMin(SHOPEE_DEFAULT_AGE_MIN);
+      setAgeMax(SHOPEE_DEFAULT_AGE_MAX);
+      return;
+    }
+
+    setDailyBudget(FACEBOOK_DEFAULT_DAILY_BUDGET);
+    setAgeMin(FACEBOOK_DEFAULT_AGE_MIN);
+    setAgeMax(FACEBOOK_DEFAULT_AGE_MAX);
+  }, [selectedProvider]);
 
   const filteredAccountOptions = useMemo(() => {
     const query = normalizeAccountQuery(accountQuery);
@@ -148,17 +217,42 @@ export default function CreateCampaign() {
   }, []);
 
   // ── Load ALL posts from ALL pages ──
+  const loadSavedPosts = useCallback(async (options = {}) => {
+    const { silent = false } = options;
+    if (allPostsLoadingRef.current) return;
+    allPostsLoadingRef.current = true;
+    if (!silent) setLoadingAllPosts(true);
+    try {
+      const params = new URLSearchParams({
+        limit: String(SAVED_POSTS_LIMIT)
+      });
+      const data = await api('GET', `/posts/saved?${params.toString()}`);
+      setAllPosts(data.posts || []);
+      setVisiblePostCount(postsPerPageLimit);
+    } catch (e) {
+      if (!silent) toast.error('Loi tai bai viet da luu: ' + e.message);
+    } finally {
+      allPostsLoadingRef.current = false;
+      if (!silent) setLoadingAllPosts(false);
+    }
+  }, [postsPerPageLimit]);
+
   const loadAllPosts = useCallback(async (refresh = false, options = {}) => {
     const { silent = false } = options;
     if (allPostsLoadingRef.current) return;
     allPostsLoadingRef.current = true;
     if (!silent) setLoadingAllPosts(true);
     try {
-      const refreshParam = refresh ? '&refresh=1' : '';
-      const path = `/pages/all-posts?limit=${ALL_POSTS_LIMIT}&perPage=${POSTS_PER_PAGE_PREVIEW}${refreshParam}`;
+      const params = new URLSearchParams({
+        limit: String(FB_REFRESH_POSTS_LIMIT),
+        perPage: String(postsPerPageLimit),
+        provider: selectedProvider
+      });
+      if (refresh) params.set('refresh', '1');
+      const path = `/pages/all-posts?${params.toString()}`;
       const data = await api('GET', path);
       setAllPosts(data.posts || []);
-      setVisiblePostCount(POST_RENDER_BATCH);
+      setVisiblePostCount(postsPerPageLimit);
       if (!silent) toast.success(`Đã tải ${data.total} bài viết từ ${data.pageCount} Pages`);
     } catch (e) {
       if (!silent) toast.error('Lỗi tải bài viết: ' + e.message);
@@ -166,16 +260,16 @@ export default function CreateCampaign() {
       allPostsLoadingRef.current = false;
       if (!silent) setLoadingAllPosts(false);
     }
-  }, []);
+  }, [postsPerPageLimit, selectedProvider]);
 
   useEffect(() => {
     loadPages();
-    loadAllPosts(false);
+    loadSavedPosts();
     const interval = setInterval(() => {
-      loadAllPosts(true, { silent: true });
+      loadSavedPosts({ silent: true });
     }, POSTS_AUTO_REFRESH_MS);
     return () => clearInterval(interval);
-  }, [loadPages, loadAllPosts]);
+  }, [loadPages, loadSavedPosts]);
 
   // ── Load Posts for a specific Page ──
   const selectPage = async (page) => {
@@ -183,24 +277,29 @@ export default function CreateCampaign() {
       // Deselect → show all
       setSelectedPage(null);
       setPagePosts([]);
-      setVisiblePostCount(POST_RENDER_BATCH);
+      setVisiblePostCount(postsPerPageLimit);
       return;
     }
     setSelectedPage(page);
-    if (pagePostCache[page.id]) {
-      setPagePosts(pagePostCache[page.id]);
-      setVisiblePostCount(POST_RENDER_BATCH);
+    const pageCacheKey = `${selectedProvider}:${page.id}:${postsPerPageLimit}`;
+    if (pagePostCache[pageCacheKey]) {
+      setPagePosts(pagePostCache[pageCacheKey]);
+      setVisiblePostCount(postsPerPageLimit);
       return;
     }
 
     setPagePosts([]);
     setLoadingPosts(true);
     try {
-      const data = await api('GET', `/pages/${page.id}/posts?limit=${SELECTED_PAGE_POST_LIMIT}`);
+      const params = new URLSearchParams({
+        limit: String(postsPerPageLimit),
+        provider: selectedProvider
+      });
+      const data = await api('GET', `/pages/${page.id}/posts?${params.toString()}`);
       const posts = data.posts || [];
       setPagePosts(posts);
-      setVisiblePostCount(POST_RENDER_BATCH);
-      setPagePostCache(prev => ({ ...prev, [page.id]: posts }));
+      setVisiblePostCount(postsPerPageLimit);
+      setPagePostCache(prev => ({ ...prev, [pageCacheKey]: posts }));
     } catch (e) {
       toast.error('Lỗi tải bài viết: ' + e.message);
     } finally {
@@ -211,18 +310,46 @@ export default function CreateCampaign() {
   const showAllPages = () => {
     setSelectedPage(null);
     setPagePosts([]);
-    setVisiblePostCount(POST_RENDER_BATCH);
+    setVisiblePostCount(postsPerPageLimit);
   };
 
+  useEffect(() => {
+    if (selectedProvider !== 'shopee' || !selectedPage) return;
+    if (!hasShopeePageScope || !shopeeLinkedPageIdSet.has(String(selectedPage.id))) {
+      setSelectedPage(null);
+      setPagePosts([]);
+      setVisiblePostCount(postsPerPageLimit);
+    }
+  }, [hasShopeePageScope, postsPerPageLimit, selectedPage, selectedProvider, shopeeLinkedPageIdSet]);
+
   const createCampaignsFromCodes = async () => {
-    const codes = campaignCodes
-      .split(/[\n,;|]+/)
-      .map(code => code.trim())
-      .filter(Boolean);
+    const campaignNameLines = splitNonEmptyLines(campaignCodes);
+    const productLinkLines = splitNonEmptyLines(campaignLinks);
+    const hasLegacyShopeeRows = selectedProvider === 'shopee'
+      && productLinkLines.length === 0
+      && campaignNameLines.some(line => line.includes('|'));
+    const codesPayload = selectedProvider === 'shopee' && productLinkLines.length > 0
+      ? campaignNameLines.map((name, index) => `${name} | ${productLinkLines[index]}`).join('\n')
+      : campaignCodes;
+    const codes = splitNonEmptyLines(codesPayload);
 
     if (!selectedAccountId) {
       toast.error('Chọn tài khoản quảng cáo trước');
       return;
+    }
+    if (selectedProvider === 'shopee' && !hasLegacyShopeeRows) {
+      if (!campaignNameLines.length) {
+        toast.error('Nhập tên camp');
+        return;
+      }
+      if (!productLinkLines.length) {
+        toast.error('Nhập link sản phẩm Shopee');
+        return;
+      }
+      if (campaignNameLines.length !== productLinkLines.length) {
+        toast.error('Số dòng tên camp phải bằng số dòng link sản phẩm');
+        return;
+      }
     }
     if (!codes.length) {
       toast.error('Nhập ít nhất một mã sản phẩm');
@@ -234,13 +361,15 @@ export default function CreateCampaign() {
     try {
       const result = await api('POST', '/campaigns/create-from-posts', {
         accountId: selectedAccountId,
-        codes,
+        codes: codesPayload,
         dailyBudget,
         startTime: campaignStartTime,
         ageMin,
         ageMax,
-        adNamePrefix,
+        ...(selectedProvider === 'shopee' ? { bidAmount } : { adNamePrefix }),
         pageId: selectedPage?.id || ''
+      }, {
+        timeoutMs: 15 * 60 * 1000
       });
       setCampaignCreateResult(result);
       if (result.created?.length) {
@@ -248,7 +377,12 @@ export default function CreateCampaign() {
         loadTodayCampaigns();
       }
       if (result.errors?.length) {
-        toast.warn(`${result.errors.length} mã chưa tạo được`);
+        const firstError = result.errors[0]?.error || '';
+        if (!result.created?.length && firstError) {
+          toast.error(`Lỗi tạo camp: ${firstError}`);
+        } else {
+          toast.warn(`${result.errors.length} mã chưa tạo được`);
+        }
       }
     } catch (e) {
       toast.error('Lỗi tạo camp: ' + e.message);
@@ -257,8 +391,14 @@ export default function CreateCampaign() {
     }
   };
 
+  const scopedAllPosts = useMemo(() => {
+    if (selectedProvider !== 'shopee') return allPosts;
+    if (!hasShopeePageScope) return [];
+    return allPosts.filter(post => shopeeLinkedPageIdSet.has(getPostPageId(post)));
+  }, [allPosts, hasShopeePageScope, selectedProvider, shopeeLinkedPageIdSet]);
+
   // Determine which posts to display
-  const rawPosts = selectedPage ? pagePosts : allPosts;
+  const rawPosts = selectedPage ? pagePosts : scopedAllPosts;
   const isLoadingDisplay = selectedPage ? loadingPosts : loadingAllPosts;
 
   // Filter posts by search
@@ -280,13 +420,19 @@ export default function CreateCampaign() {
   );
 
   useEffect(() => {
-    setVisiblePostCount(POST_RENDER_BATCH);
-  }, [selectedPage, searchPost]);
+    setVisiblePostCount(postsPerPageLimit);
+  }, [postsPerPageLimit, selectedPage, searchPost]);
 
   // Filter pages by search
-  const filteredPages = useMemo(() => (
-    pages.filter(p => p.name.toLowerCase().includes(searchPage.toLowerCase()))
-  ), [pages, searchPage]);
+  const filteredPages = useMemo(() => {
+    let result = pages;
+    if (selectedProvider === 'shopee') {
+      result = hasShopeePageScope
+        ? result.filter(p => shopeeLinkedPageIdSet.has(String(p.id)))
+        : [];
+    }
+    return result.filter(p => p.name.toLowerCase().includes(searchPage.toLowerCase()));
+  }, [hasShopeePageScope, pages, searchPage, selectedProvider, shopeeLinkedPageIdSet]);
 
   const truncateText = (text, max = 120) => {
     if (!text) return 'Không có nội dung';
@@ -298,18 +444,25 @@ export default function CreateCampaign() {
     return new Date(d).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
   };
 
+  const campaignFormColumns = selectedProvider === 'shopee'
+    ? 'minmax(240px, 0.9fr) minmax(300px, 1.15fr) minmax(340px, 1.35fr) 140px 110px 180px 80px 80px'
+    : 'minmax(260px, 1fr) 120px minmax(340px, 1.4fr) 150px 190px 90px 90px';
+
   return (
     <div id="page-create-campaign">
       <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: '16px', minHeight: 'calc(100vh - 140px)' }}>
-        <div className="card" style={{ gridColumn: '1 / -1' }}>
+        <div className="card" style={{ gridColumn: '1 / -1', overflow: 'visible' }}>
           <div className="card-header">
             <div className="card-title">Tạo camp từ mã sản phẩm</div>
             <button className="btn btn-g btn-sm" onClick={createCampaignsFromCodes} disabled={creatingCampaigns}>
               {creatingCampaigns ? 'Đang tạo...' : 'Tạo camp'}
             </button>
           </div>
-          <div style={{ padding: '14px 16px', display: 'grid', gridTemplateColumns: 'minmax(220px, 1fr) 120px minmax(260px, 1.2fr) 150px 190px 90px 90px', gap: '12px', alignItems: 'end' }}>
-            <div className="form-group" style={{ marginBottom: 0 }}>
+          <div
+            className={`campaign-create-controls ${selectedProvider === 'shopee' ? 'shopee' : 'facebook'}`}
+            style={{ gridTemplateColumns: campaignFormColumns }}
+          >
+            <div className="form-group campaign-codes-field" style={{ marginBottom: 0 }}>
               <label>Tài khoản quảng cáo</label>
               <div className="account-combobox">
                 <input
@@ -385,24 +538,38 @@ export default function CreateCampaign() {
                 </div>
               )}
             </div>
-            <div className="form-group" style={{ marginBottom: 0 }}>
-              <label>Mã nhân viên</label>
-              <select value={adNamePrefix} onChange={e => setAdNamePrefix(e.target.value)}>
-                {AD_NAME_PREFIX_OPTIONS.map(name => (
-                  <option key={name} value={name}>{name}</option>
-                ))}
-              </select>
-            </div>
-            <div className="form-group" style={{ marginBottom: 0 }}>
-              <label>List mã sản phẩm</label>
+            {selectedProvider !== 'shopee' && (
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label>Mã nhân viên</label>
+                <select value={adNamePrefix} onChange={e => setAdNamePrefix(e.target.value)}>
+                  {AD_NAME_PREFIX_OPTIONS.map(name => (
+                    <option key={name} value={name}>{name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <div className="form-group campaign-codes-field" style={{ marginBottom: 0 }}>
+              <label>{selectedProvider === 'shopee' ? 'Tên camp' : 'List mã sản phẩm'}</label>
               <textarea
                 rows="3"
                 value={campaignCodes}
                 onChange={e => setCampaignCodes(e.target.value)}
-                placeholder="Mỗi dòng một mã, ví dụ: XK01"
-                style={{ minHeight: '72px' }}
+                placeholder={selectedProvider === 'shopee'
+                  ? 'Mỗi dòng một tên camp, ví dụ: Váy xếp ly'
+                  : 'Mỗi dòng một mã, ví dụ: XK01'}
               />
             </div>
+            {selectedProvider === 'shopee' && (
+              <div className="form-group campaign-codes-field" style={{ marginBottom: 0 }}>
+                <label>Link sản phẩm</label>
+                <textarea
+                  rows="3"
+                  value={campaignLinks}
+                  onChange={e => setCampaignLinks(e.target.value)}
+                  placeholder="Mỗi dòng một link, ví dụ: https://s.shopee.vn/5AmboEuNpt"
+                />
+              </div>
+            )}
             <div className="form-group" style={{ marginBottom: 0 }}>
               <label>Ngân sách/ngày</label>
               <input
@@ -413,6 +580,18 @@ export default function CreateCampaign() {
                 onChange={e => setDailyBudget(Number(e.target.value || 0))}
               />
             </div>
+            {selectedProvider === 'shopee' && (
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label>Số bid</label>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={bidAmount}
+                  onChange={e => setBidAmount(Number(e.target.value || 0))}
+                />
+              </div>
+            )}
             <div className="form-group" style={{ marginBottom: 0 }}>
               <label>Thời gian bắt đầu (giờ VN)</label>
               <input
@@ -460,7 +639,7 @@ export default function CreateCampaign() {
                 </div>
                 {(campaignCreateResult.errors || []).map(item => (
                   <div key={`${item.code}-${item.error}`} style={{ fontSize: '11px', color: 'var(--muted2)', fontFamily: 'var(--mono)', marginBottom: '4px' }}>
-                    {item.code}: {item.error}
+                    {item.code}: {formatCampaignCreateError(item)}
                   </div>
                 ))}
               </div>
@@ -516,10 +695,10 @@ export default function CreateCampaign() {
               <span style={{ fontSize: '14px' }}>🌐</span>
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: '13px', fontWeight: 600, color: !selectedPage ? 'var(--b)' : 'var(--txt)' }}>
-                  Tất cả Pages
+                  {selectedProvider === 'shopee' ? 'Pages đã chọn' : 'Tất cả Pages'}
                 </div>
                 <div style={{ fontSize: '10px', color: 'var(--muted2)', fontFamily: 'var(--mono)' }}>
-                  {allPosts.length} bài viết
+                  {scopedAllPosts.length} bài viết
                 </div>
               </div>
             </div>
@@ -535,7 +714,11 @@ export default function CreateCampaign() {
             ) : filteredPages.length === 0 ? (
               <div className="empty">
                 <div className="ei">📄</div>
-                <p>Không tìm thấy Page nào</p>
+                <p>
+                  {selectedProvider === 'shopee' && !hasShopeePageScope
+                    ? 'Chưa chọn Fanpage cho tài khoản Shopee'
+                    : 'Không tìm thấy Page nào'}
+                </p>
               </div>
             ) : (
               filteredPages.map(page => (
@@ -816,9 +999,9 @@ export default function CreateCampaign() {
                 <div style={{ display: 'flex', justifyContent: 'center', padding: '12px 0 4px' }}>
                   <button
                     className="btn btn-ghost btn-sm"
-                    onClick={() => setVisiblePostCount(count => count + POST_RENDER_BATCH)}
+                    onClick={() => setVisiblePostCount(count => count + postsPerPageLimit)}
                   >
-                    Xem thêm {Math.min(POST_RENDER_BATCH, displayPosts.length - visiblePosts.length)} bài
+                    Xem thêm {Math.min(postsPerPageLimit, displayPosts.length - visiblePosts.length)} bài
                   </button>
                 </div>
               )}

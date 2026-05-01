@@ -4,9 +4,9 @@ import { useAppContext } from '../contexts/AppContext';
 import { toast } from 'react-toastify';
 
 const SAVED_POSTS_LIMIT = 5000;
-const FB_REFRESH_POSTS_LIMIT = 1000;
-const FACEBOOK_POSTS_PER_PAGE_LIMIT = 150;
-const SHOPEE_POSTS_PER_PAGE_LIMIT = 200;
+const FB_REFRESH_POSTS_LIMIT = 5000;
+const FACEBOOK_POSTS_PER_PAGE_LIMIT = 500;
+const SHOPEE_POSTS_PER_PAGE_LIMIT = 500;
 const POSTS_AUTO_REFRESH_MS = 5 * 60 * 1000;
 const FACEBOOK_DEFAULT_DAILY_BUDGET = 300000;
 const FACEBOOK_DEFAULT_AGE_MIN = 18;
@@ -18,7 +18,9 @@ const SHOPEE_DEFAULT_AGE_MAX = 44;
 const AD_NAME_PREFIX_OPTIONS = ['PHAT', 'BINH', 'HIEU'];
 
 function getDefaultCampaignStartTime() {
-  const start = new Date(Date.now() + 10 * 60 * 1000 + 7 * 60 * 60 * 1000);
+  const start = new Date(Date.now() + 7 * 60 * 60 * 1000);
+  start.setUTCDate(start.getUTCDate() + 1);
+  start.setUTCHours(6, 0, 0, 0);
   const yyyy = start.getUTCFullYear();
   const mm = String(start.getUTCMonth() + 1).padStart(2, '0');
   const dd = String(start.getUTCDate()).padStart(2, '0');
@@ -74,6 +76,25 @@ function splitNonEmptyLines(value) {
     .split(/\n+/)
     .map(item => item.trim())
     .filter(Boolean);
+}
+
+function isPagePostPermissionError(error) {
+  return error?.code === 'PAGE_POST_PERMISSION' ||
+    String(error?.message || '').includes('pages_read_engagement') ||
+    String(error?.message || '').includes('Page Public Content Access');
+}
+
+function mergePostsById(currentPosts, incomingPosts) {
+  const byId = new Map();
+  for (const post of currentPosts || []) {
+    const id = post.id || post.postId;
+    if (id) byId.set(String(id), post);
+  }
+  for (const post of incomingPosts || []) {
+    const id = post.id || post.postId;
+    if (id) byId.set(String(id), post);
+  }
+  return [...byId.values()].sort((a, b) => new Date(b.createdTime || 0) - new Date(a.createdTime || 0));
 }
 
 export default function CreateCampaign() {
@@ -246,7 +267,8 @@ export default function CreateCampaign() {
       const params = new URLSearchParams({
         limit: String(FB_REFRESH_POSTS_LIMIT),
         perPage: String(postsPerPageLimit),
-        provider: selectedProvider
+        provider: selectedProvider,
+        maxPages: '5'
       });
       if (refresh) params.set('refresh', '1');
       const path = `/pages/all-posts?${params.toString()}`;
@@ -255,12 +277,19 @@ export default function CreateCampaign() {
       setVisiblePostCount(postsPerPageLimit);
       if (!silent) toast.success(`Đã tải ${data.total} bài viết từ ${data.pageCount} Pages`);
     } catch (e) {
-      if (!silent) toast.error('Lỗi tải bài viết: ' + e.message);
+      if (!silent) {
+        if (isPagePostPermissionError(e)) {
+          toast.info('Token/App chua co quyen doc bai viet Page. Dang hien bai viet da luu.');
+          loadSavedPosts({ silent: true });
+        } else {
+          toast.error('Loi tai bai viet: ' + e.message);
+        }
+      }
     } finally {
       allPostsLoadingRef.current = false;
       if (!silent) setLoadingAllPosts(false);
     }
-  }, [postsPerPageLimit, selectedProvider]);
+  }, [loadSavedPosts, postsPerPageLimit, selectedProvider]);
 
   useEffect(() => {
     loadPages();
@@ -298,10 +327,15 @@ export default function CreateCampaign() {
       const data = await api('GET', `/pages/${page.id}/posts?${params.toString()}`);
       const posts = data.posts || [];
       setPagePosts(posts);
+      setAllPosts(prev => mergePostsById(prev, posts));
       setVisiblePostCount(postsPerPageLimit);
       setPagePostCache(prev => ({ ...prev, [pageCacheKey]: posts }));
     } catch (e) {
-      toast.error('Lỗi tải bài viết: ' + e.message);
+      if (isPagePostPermissionError(e)) {
+        toast.info('Token/App chua co quyen doc bai viet Page. Hay dung bai viet da luu hoac cap quyen pages_read_engagement.');
+      } else {
+        toast.error('Loi tai bai viet: ' + e.message);
+      }
     } finally {
       setLoadingPosts(false);
     }
@@ -373,7 +407,7 @@ export default function CreateCampaign() {
       });
       setCampaignCreateResult(result);
       if (result.created?.length) {
-        toast.success(`Đã tạo ${result.created.length} camp active, bắt đầu ${result.startTimeDisplay || '06:01 ngày mai'}`);
+        toast.success(`Đã tạo ${result.created.length} camp active, bắt đầu ${result.startTimeDisplay || '06:00 ngày mai'}`);
         loadTodayCampaigns();
       }
       if (result.errors?.length) {

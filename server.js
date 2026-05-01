@@ -5,6 +5,7 @@ const cors = require('cors');
 const cron = require('node-cron');
 const axios = require('axios');
 const path = require('path');
+const crypto = require('crypto');
 const { Queue, Worker } = require('bullmq');
 const IORedis = require('ioredis');
 const registerPageRoutes = require('./routes/pageRoutes');
@@ -12,6 +13,7 @@ const { parseBoundedInt } = require('./utils/number');
 
 const app = express();
 const publicDir = path.join(__dirname, 'client', 'dist');
+app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json());
 app.use(express.static(publicDir));
@@ -25,7 +27,7 @@ function isWithinAutoRuleTimeWindow(startTime, endTime) {
   const vnMinutes = (utcMinutes + vnOffset) % (24 * 60);
 
   const [sh, sm] = (startTime || '00:00').split(':').map(Number);
-  const [eh, em] = (endTime || '08:30').split(':').map(Number);
+  const [eh, em] = (endTime || '09:00').split(':').map(Number);
   const startMin = sh * 60 + sm;
   const endMin = eh * 60 + em;
 
@@ -480,9 +482,72 @@ async function exchangeToken(shortToken, appId, appSecret) {
   }
 }
 
+async function getAutoCheckIntervalSeconds(account) {
+  const config = await getAppConfig();
+  const ruleStart = config?.autoRuleStartTime || '00:00';
+  const ruleEnd = config?.autoRuleEndTime || '09:00';
+  return isWithinAutoRuleTimeWindow(ruleStart, ruleEnd)
+    ? Number(account.checkInterval || 60)
+    : 300;
+}
+
+function getFacebookOAuthRedirectUri(req) {
+  const configured = String(process.env.FB_OAUTH_REDIRECT_URI || '').trim();
+  if (configured) return configured;
+  const baseUrl = String(process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+  return `${baseUrl}/api/facebook/oauth/callback`;
+}
+
+function getFacebookOAuthState(req) {
+  const state = crypto.randomBytes(24).toString('hex');
+  facebookOAuthStates.set(state, {
+    createdAt: Date.now(),
+    redirectUri: getFacebookOAuthRedirectUri(req)
+  });
+
+  if (facebookOAuthStates.size > 50) {
+    const now = Date.now();
+    for (const [key, value] of facebookOAuthStates.entries()) {
+      if (now - value.createdAt > 10 * 60 * 1000) {
+        facebookOAuthStates.delete(key);
+      }
+    }
+  }
+
+  return state;
+}
+
+function renderOAuthPopupResult(payload) {
+  const json = JSON.stringify(payload).replace(/</g, '\\u003c');
+  return `<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>Facebook Login</title></head>
+  <body>
+    <script>
+      const payload = ${json};
+      if (window.opener) {
+        window.opener.postMessage({ type: 'adsctrl:facebook-oauth', payload }, window.location.origin);
+      }
+      window.close();
+    </script>
+    <p>Facebook login finished. You can close this window.</p>
+  </body>
+</html>`;
+}
+
 const FB_TRANSIENT_STATUSES = new Set([500, 502, 503, 504]);
 const FB_TRANSIENT_CODES = new Set([1, 2, 4, 17, 32, 341, 613]);
 const FB_CAMPAIGN_CREATE_REQUEST_OPTIONS = { retries: 1, rateLimitRetries: 1 };
+const FB_OAUTH_SCOPES = String(process.env.FB_OAUTH_SCOPES || [
+  'public_profile',
+  'ads_read',
+  'ads_management',
+  'business_management',
+  'pages_show_list',
+  'pages_manage_metadata',
+  'pages_read_engagement'
+].join(',')).split(',').map(scope => scope.trim()).filter(Boolean);
+const facebookOAuthStates = new Map();
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -1095,7 +1160,7 @@ async function runAutoControl(account) {
 
     const config = await getAppConfig();
     const ruleStart = config?.autoRuleStartTime || '00:00';
-    const ruleEnd = config?.autoRuleEndTime || '08:30';
+    const ruleEnd = config?.autoRuleEndTime || '09:00';
 
     let campaignsToPause = [];
     if (isWithinAutoRuleTimeWindow(ruleStart, ruleEnd)) {
@@ -1216,6 +1281,7 @@ async function runAutoControl(account) {
 
 const accountTimers = {};
 const accountRuns = {};
+const accountSchedulerActive = {};
 let facebookTokenCronTask = null;
 let finalSpendCronTask = null;
 let todayCampaignSpendSyncTimer = null;
@@ -1469,12 +1535,29 @@ async function runAutoControlSafely(account, source = 'auto') {
 }
 
 async function startAccountScheduler(account) {
-  if (accountTimers[account._id]) clearInterval(accountTimers[account._id]);
-  const ms = (account.checkInterval || 60) * 1000;
-  accountTimers[account._id] = setInterval(() => {
-    runAutoControlSafely(account, 'Scheduled');
-  }, ms);
+  const accountId = String(account._id);
+  if (accountTimers[accountId]) clearTimeout(accountTimers[accountId]);
+  accountSchedulerActive[accountId] = true;
+
+  const scheduleNext = async () => {
+    if (!isMongoReady() || !accountSchedulerActive[accountId]) return;
+    let intervalSeconds = 300;
+    try {
+      intervalSeconds = await getAutoCheckIntervalSeconds(account);
+    } catch (error) {
+      if (!isShuttingDown) {
+        console.error(`Auto scheduler interval failed for ${account.name}: ${error.message}`);
+      }
+    }
+    accountTimers[accountId] = setTimeout(async () => {
+      if (!accountSchedulerActive[accountId]) return;
+      await runAutoControlSafely(account, 'Scheduled');
+      scheduleNext();
+    }, intervalSeconds * 1000);
+  };
+
   runAutoControlSafely(account, 'Initial');
+  scheduleNext();
 }
 
 async function syncTodayCampaignSpendForAccount(account) {
@@ -1549,8 +1632,9 @@ function startTodayCampaignSpendSync() {
 }
 
 function stopAccountScheduler(accountId) {
+  accountSchedulerActive[accountId] = false;
   if (accountTimers[accountId]) {
-    clearInterval(accountTimers[accountId]);
+    clearTimeout(accountTimers[accountId]);
     delete accountTimers[accountId];
   }
 }
@@ -1686,7 +1770,7 @@ app.get('/api/config', async (req, res) => {
       hasPancakeShopId: Boolean(config?.pancakeShopId),
       pancakeShopId: config?.pancakeShopId || '',
       autoRuleStartTime: config?.autoRuleStartTime || '00:00',
-      autoRuleEndTime: config?.autoRuleEndTime || '08:30',
+      autoRuleEndTime: config?.autoRuleEndTime || '09:00',
 
       dailyZeroMessageSpendLimit: config?.dailyZeroMessageSpendLimit || 25000,
       dailyHighCostPerMessageLimit: config?.dailyHighCostPerMessageLimit || 20000,
@@ -1754,6 +1838,96 @@ app.post(['/token/refresh', '/api/token/refresh'], async (req, res) => {
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/facebook/oauth/start', async (req, res) => {
+  try {
+    const config = await getAppConfig();
+    const appId = String(config?.fbAppId || process.env.FB_APP_ID || '').trim();
+    const appSecret = String(config?.fbAppSecret || process.env.FB_APP_SECRET || '').trim();
+    if (!appId || !appSecret) {
+      return res.status(400).json({ error: 'Chua cau hinh Facebook App ID va App Secret' });
+    }
+
+    const state = getFacebookOAuthState(req);
+    const redirectUri = getFacebookOAuthRedirectUri(req);
+    const params = new URLSearchParams({
+      client_id: appId,
+      redirect_uri: redirectUri,
+      state,
+      response_type: 'code',
+      scope: FB_OAUTH_SCOPES.join(','),
+      auth_type: 'rerequest'
+    });
+
+    res.json({
+      ok: true,
+      authUrl: `https://www.facebook.com/${FACEBOOK_GRAPH_API_VERSION}/dialog/oauth?${params.toString()}`,
+      redirectUri,
+      scopes: FB_OAUTH_SCOPES
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/facebook/oauth/callback', async (req, res) => {
+  try {
+    const { code, state, error, error_description } = req.query;
+    if (error) {
+      return res.status(400).send(renderOAuthPopupResult({
+        ok: false,
+        error: String(error_description || error)
+      }));
+    }
+
+    const stateRecord = facebookOAuthStates.get(String(state || ''));
+    facebookOAuthStates.delete(String(state || ''));
+    if (!code || !stateRecord || Date.now() - stateRecord.createdAt > 10 * 60 * 1000) {
+      return res.status(400).send(renderOAuthPopupResult({
+        ok: false,
+        error: 'Phien dang nhap Facebook khong hop le hoac da het han'
+      }));
+    }
+
+    const config = await getAppConfig();
+    const appId = String(config?.fbAppId || process.env.FB_APP_ID || '').trim();
+    const appSecret = String(config?.fbAppSecret || process.env.FB_APP_SECRET || '').trim();
+    if (!appId || !appSecret) {
+      throw new Error('Chua cau hinh Facebook App ID va App Secret');
+    }
+
+    const tokenResponse = await axios.get(`https://graph.facebook.com/${FACEBOOK_GRAPH_API_VERSION}/oauth/access_token`, {
+      params: {
+        client_id: appId,
+        client_secret: appSecret,
+        redirect_uri: stateRecord.redirectUri,
+        code
+      },
+      timeout: 15000
+    });
+    const shortToken = tokenResponse.data?.access_token;
+    if (!shortToken) throw new Error('Facebook khong tra ve access_token');
+
+    const longLivedToken = await exchangeToken(shortToken, appId, appSecret);
+    const tokenState = await configureFacebookToken({
+      app_id: appId,
+      app_secret: appSecret,
+      long_lived_user_access_token: longLivedToken
+    });
+
+    res.send(renderOAuthPopupResult({
+      ok: true,
+      expires_at: tokenState.expires_at,
+      scopes: FB_OAUTH_SCOPES
+    }));
+  } catch (callbackError) {
+    await sendTokenAlert('Facebook OAuth login failed', { error: callbackError.message });
+    res.status(400).send(renderOAuthPopupResult({
+      ok: false,
+      error: callbackError.message
+    }));
   }
 });
 
@@ -2497,7 +2671,7 @@ async function processCampaignDuplicateExactRequest(body = {}, onProgress = null
 
 app.post('/api/campaigns/duplicate-exact', async (req, res) => {
   try {
-    if (campaignDuplicateQueue && req.body?.queue !== false) {
+    if (campaignDuplicateQueue && req.body?.queue === true) {
       startCampaignDuplicateWorker();
       const job = await campaignDuplicateQueue.add('duplicate-exact', req.body);
       return res.status(202).json({
@@ -3260,7 +3434,6 @@ function startFinalSpendCron() {
   console.log(`Final spend cron scheduled: ${FINAL_SPEND_CRON} (${FINAL_SPEND_TIMEZONE})`);
   return task;
 }
-
 app.post('/api/campaigns/sync-history', async (req, res) => {
   try {
     const { fromDate, toDate, provider, accountId } = req.body;
@@ -3272,27 +3445,30 @@ app.post('/api/campaigns/sync-history', async (req, res) => {
     }
 
     const dates = assertPastCampaignSyncRange(fromDate, toDate);
-    if (!campaignSyncQueue) {
-      return res.status(503).json({ error: 'Redis/BullMQ queue chua duoc bat. Cau hinh REDIS_URL hoac REDIS_QUEUE_ENABLED=true.' });
-    }
-
-    const job = await campaignSyncQueue.add('sync-history', {
+    const payload = {
       fromDate,
       toDate,
       provider: normalizeProvider(provider),
       accountId,
       totalDays: dates.length
-    });
-    startCampaignSyncWorker();
+    };
 
-    res.status(202).json({
-      ok: true,
-      queued: true,
-      queue: CAMPAIGN_SYNC_QUEUE_NAME,
-      jobId: String(job.id),
-      statusUrl: `/api/campaigns/sync-history/${job.id}`,
-      message: 'Đang Đồng Bộ Trong Nền'
-    });
+    if (campaignSyncQueue && req.body?.queue === true) {
+      const job = await campaignSyncQueue.add('sync-history', payload);
+      startCampaignSyncWorker();
+
+      return res.status(202).json({
+        ok: true,
+        queued: true,
+        queue: CAMPAIGN_SYNC_QUEUE_NAME,
+        jobId: String(job.id),
+        statusUrl: `/api/campaigns/sync-history/${job.id}`,
+        message: 'Dang dong bo trong nen'
+      });
+    }
+
+    const result = await processCampaignSyncHistoryJob(payload);
+    res.json({ ok: true, queued: false, ...result });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
@@ -3554,7 +3730,7 @@ app.get('/api/orders/sku-counts', async (req, res) => {
 app.post('/api/orders/sync', async (req, res) => {
   try {
     const { fromDate, toDate } = req.body;
-    if (orderSheetSyncQueue) {
+    if (orderSheetSyncQueue && req.body?.queue === true) {
       const job = await orderSheetSyncQueue.add('sync-sheet', { fromDate, toDate });
       return res.status(202).json({
         ok: true,

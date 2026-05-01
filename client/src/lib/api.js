@@ -73,7 +73,12 @@ export async function api(method, path, body = null, options = {}) {
   }
 
   if (!res.ok) {
-    throw new Error(data?.error || `API error ${res.status}`);
+    const error = new Error(data?.error || `API error ${res.status}`);
+    error.status = res.status;
+    if (data && typeof data === 'object') {
+      Object.assign(error, data);
+    }
+    throw error;
   }
 
   return data;

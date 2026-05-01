@@ -19,6 +19,7 @@ const SortIcon = ({ field, sortField, sortDir }) => {
 
 const formatPercent = (value) => `${(Number(value || 0) * 100).toFixed(2).replace('.', ',')}%`;
 const DASHBOARD_CAMPAIGNS_PER_PAGE = 100;
+const CAMPAIGN_RETURN_STATS_FROM_DATE = '2026-02-22';
 
 export default function Dashboard() {
   const { provider, stats: globalStats, loading: globalLoading } = useAppContext();
@@ -110,7 +111,6 @@ export default function Dashboard() {
       const data = await api('GET', `/orders/sku-counts?fromDate=${from}&toDate=${to}`);
       setSkuCounts(data.counts || {});
       setSkuTotal(data.totalOrders || 0);
-      setReturnStatsBySku(data.returnStatsBySku || {});
       setOrderReturnStats(data.returnStats || {
         returned: 0,
         returning: 0,
@@ -118,6 +118,8 @@ export default function Dashboard() {
         denominator: 0,
         rate: 0
       });
+      const returnData = await api('GET', `/orders/sku-counts?fromDate=${CAMPAIGN_RETURN_STATS_FROM_DATE}&toDate=${todayString()}`);
+      setReturnStatsBySku(returnData.returnStatsBySku || {});
     } catch {
       setSkuCounts({});
       setSkuTotal(0);
@@ -162,7 +164,7 @@ export default function Dashboard() {
   // Xử lý campaigns: thêm orderCount, CPO — sort theo sortField/sortDir
   const processedCampaigns = useMemo(() => {
     const mapped = localCampaigns
-      .filter(c => c.spend > 0 && String(c.status || '').toUpperCase() === 'ACTIVE')
+      .filter(c => Number(c.spend || 0) > 0)
       .map(c => {
         const orderCount = showOrders ? getOrderCountForCampaign(c.name) : 0;
         const returnStats = showOrders ? getReturnStatsForCampaign(c.name) : { denominator: 0, rate: 0 };
@@ -173,6 +175,10 @@ export default function Dashboard() {
 
     return [...mapped].sort((a, b) => {
       const dir = sortDir === 'asc' ? 1 : -1;
+      const sA = String(a.status || '').toUpperCase() === 'ACTIVE' ? 1 : 0;
+      const sB = String(b.status || '').toUpperCase() === 'ACTIVE' ? 1 : 0;
+      if (sA !== sB) return sB - sA;
+
       if (sortField === 'orderCount') return dir * ((a.orderCount || 0) - (b.orderCount || 0));
       if (sortField === 'costPerOrder') {
         // đơn = 0 thì luôn xuống cuối
@@ -190,9 +196,6 @@ export default function Dashboard() {
         return dir * ((a.returnRate || 0) - (b.returnRate || 0));
       }
       // default: active trước, rồi spend
-      const sA = String(a.status || '').toUpperCase() === 'ACTIVE' ? 1 : 0;
-      const sB = String(b.status || '').toUpperCase() === 'ACTIVE' ? 1 : 0;
-      if (sA !== sB) return sB - sA;
       return b.spend - a.spend;
     });
   }, [localCampaigns, getOrderCountForCampaign, getReturnStatsForCampaign, showOrders, sortField, sortDir]);

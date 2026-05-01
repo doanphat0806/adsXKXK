@@ -106,7 +106,13 @@ export default function Campaigns() {
       });
 
       if (!res.jobId) {
-        toast.success(res.message || 'Da bat dau dong bo');
+        setSyncJob(res);
+        if (res.errors?.length) {
+          toast.warn(`Dong bo xong, co ${res.errors.length} ngay loi`);
+        } else {
+          toast.success(`Dong bo xong ${res.syncedRows || 0} camp`);
+        }
+        await loadCampaigns(true);
         return;
       }
 

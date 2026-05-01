@@ -9,9 +9,10 @@ export default function ConfigModal() {
   
   const [fbToken, setFbToken] = useState('');
   const [fbApp, setFbApp] = useState({ id: '', secret: '' });
+  const [fbOAuthLoading, setFbOAuthLoading] = useState(false);
   const [claudeKey, setClaudeKey] = useState('');
   const [pancake, setPancake] = useState({ apiKey: '', shopId: '' });
-  const [autoRules, setAutoRules] = useState({ start: '00:00', end: '08:30' });
+  const [autoRules, setAutoRules] = useState({ start: '00:00', end: '09:00' });
   const [autoLimits, setAutoLimits] = useState({
     dailyZero: 25000, dailyHighCost: 20000, dailyHighSpend: 50000,
     lifetimeZero: 25000, lifetimeHighCost: 20000, lifetimeHighSpend: 50000,
@@ -25,7 +26,7 @@ export default function ConfigModal() {
       setPancake({ apiKey: '', shopId: appConfig.pancakeShopId || '' });
       setAutoRules({ 
         start: appConfig.autoRuleStartTime || '00:00', 
-        end: appConfig.autoRuleEndTime || '08:30' 
+        end: appConfig.autoRuleEndTime || '09:00' 
       });
       // Populating limits from config if available
       setAutoLimits({
@@ -53,6 +54,47 @@ export default function ConfigModal() {
     }
   };
 
+  const loginFacebookOAuth = async () => {
+    if (fbOAuthLoading) return;
+    setFbOAuthLoading(true);
+
+    const handleMessage = async (event) => {
+      if (event.origin !== window.location.origin) return;
+      if (event.data?.type !== 'adsctrl:facebook-oauth') return;
+
+      window.removeEventListener('message', handleMessage);
+      setFbOAuthLoading(false);
+
+      const payload = event.data.payload || {};
+      if (!payload.ok) {
+        toast.error('Facebook login loi: ' + (payload.error || 'Khong xac dinh'));
+        return;
+      }
+
+      await loadConfig();
+      setFbToken('');
+      toast.success('Da dang nhap Facebook va luu token du quyen');
+    };
+
+    try {
+      if (fbApp.id || fbApp.secret) {
+        await api('PUT', '/config', { fbAppId: fbApp.id, fbAppSecret: fbApp.secret });
+      }
+      const result = await api('GET', '/facebook/oauth/start');
+      window.addEventListener('message', handleMessage);
+      const popup = window.open(result.authUrl, 'facebook-oauth', 'width=720,height=760');
+      if (!popup) {
+        window.removeEventListener('message', handleMessage);
+        setFbOAuthLoading(false);
+        toast.error('Trinh duyet da chan popup. Hay cho phep popup roi thu lai.');
+      }
+    } catch (e) {
+      window.removeEventListener('message', handleMessage);
+      setFbOAuthLoading(false);
+      toast.error('Loi Facebook login: ' + e.message);
+    }
+  };
+
   return (
     <div className="card" style={{ border: 'none', margin: 0, width: '100%', maxWidth: '700px', maxHeight: '90vh', overflowY: 'auto' }}>
       <div className="card-header">
@@ -64,6 +106,14 @@ export default function ConfigModal() {
         {/* Section: Facebook Token */}
         <section className="section-gap">
           <div className="section-title">1. Facebook Access Token (Dùng chung)</div>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '12px' }}>
+            <button className="btn btn-g btn-sm" onClick={loginFacebookOAuth} disabled={fbOAuthLoading}>
+              {fbOAuthLoading ? 'Dang doi Facebook...' : 'Dang nhap Facebook cap full quyen'}
+            </button>
+            <span style={{ fontSize: '12px', color: 'var(--muted2)' }}>
+              Yeu cau quyen ads_read, ads_management, business_management, pages_show_list, pages_manage_metadata va pages_read_engagement.
+            </span>
+          </div>
           <div className="form-group">
             <input 
               type="password" 

@@ -35,6 +35,25 @@ function getPostCache(key, refresh = false) {
   return cached.value;
 }
 
+function isPagePermissionError(error) {
+  const apiError = error?.fbData?.error || error?.response?.data?.error || {};
+  const message = String(apiError.message || error?.message || '');
+  return Number(apiError.code) === 10 ||
+    message.includes('pages_read_engagement') ||
+    message.includes('Page Public Content Access');
+}
+
+function getPostFetchError(error) {
+  if (isPagePermissionError(error)) {
+    return {
+      error: 'Token/App chua co quyen doc bai viet Page. Can pages_read_engagement hoac Page Public Content Access.',
+      code: 'PAGE_POST_PERMISSION',
+      permission: 'pages_read_engagement'
+    };
+  }
+  return { error: error.message };
+}
+
 function setPostCache(key, value) {
   postCache.set(key, { value, createdAt: Date.now() });
   return value;
@@ -164,7 +183,7 @@ app.get('/api/pages', async (req, res) => {
 
     res.json({ ok: true, pages: allPages, total: allPages.length });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(400).json(getPostFetchError(error));
   }
 });
 
@@ -197,7 +216,7 @@ app.get('/api/posts/saved', async (req, res) => {
       source: 'saved'
     });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    res.status(400).json(getPostFetchError(error));
   }
 });
 
@@ -241,9 +260,7 @@ app.get('/api/pages/all-posts', async (req, res) => {
       ALL_POSTS_MAX_LIMIT
     );
 
-    const pagesToFetch = requestedTotalLimit
-      ? allPages.slice(0, Math.ceil(totalLimit / perPage))
-      : allPages;
+    const pagesToFetch = allPages;
 
     const results = await mapInBatches(
       pagesToFetch,

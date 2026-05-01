@@ -4,7 +4,7 @@ import { api } from '../lib/api';
 import { toast } from 'react-toastify';
 
 export default function Topbar({ title }) {
-  const { provider, logout, refreshAll, loadAll, openModal } = useAppContext();
+  const { provider, logout, refreshAll, loadAccounts, openModal } = useAppContext();
   const [discovering, setDiscovering] = React.useState(false);
 
   const handleAutoDiscover = async () => {
@@ -20,9 +20,13 @@ export default function Topbar({ title }) {
       }, {
         timeoutMs: 90000
       });
-      await loadAll();
+      await loadAccounts();
       toast.success(result.message || 'Da dong bo tai khoan duoc gan trong BM');
     } catch (e) {
+      if (e.rateLimited || e.status === 429) {
+        toast.info('Facebook dang gioi han Auto Discover. Doi vai phut roi bam lai.');
+        return;
+      }
       toast.error('Loi: ' + e.message);
     } finally {
       setDiscovering(false);

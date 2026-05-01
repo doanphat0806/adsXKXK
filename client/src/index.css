@@ -2462,6 +2462,146 @@
       width: 24%;
     }
 
+    @media (max-width: 900px) {
+      .topbar {
+        align-items: flex-start;
+      }
+
+      .topbar-title {
+        width: 100%;
+      }
+
+      .topbar-actions {
+        width: 100%;
+        justify-content: flex-start;
+        gap: 8px;
+      }
+
+      .topbar-actions .btn {
+        height: 32px;
+        padding: 0 10px;
+        white-space: nowrap;
+      }
+
+      #page-dashboard > .card > .card-header {
+        align-items: flex-start;
+      }
+
+      #page-dashboard > .card > .card-header > div {
+        width: 100%;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      #page-dashboard .card-title {
+        min-width: 0;
+        flex: 1 1 240px;
+      }
+
+      #page-dashboard .drp-container,
+      #page-dashboard .drp-trigger {
+        max-width: 100%;
+      }
+
+      #dashCampTable {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        contain: layout paint;
+      }
+
+      #dashCampTable table {
+        width: max-content;
+        min-width: 980px;
+        table-layout: auto;
+      }
+
+      #dashCampTable th,
+      #dashCampTable td {
+        overflow: visible;
+        text-overflow: clip;
+        white-space: nowrap;
+      }
+
+      #dashCampTable th:first-child,
+      #dashCampTable td:first-child {
+        width: 220px;
+        min-width: 220px;
+        white-space: normal;
+      }
+
+      #dashCampTable th:nth-child(3),
+      #dashCampTable td:nth-child(3) {
+        min-width: 150px;
+        white-space: normal;
+      }
+    }
+
+    @media (max-width: 560px) {
+      .main {
+        width: calc(100vw - 56px);
+      }
+
+      .content {
+        padding: 12px 10px;
+      }
+
+      .topbar {
+        padding: 12px;
+      }
+
+      .topbar-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .topbar-actions #dateLabel {
+        grid-column: 1 / -1;
+      }
+
+      .topbar-actions .btn {
+        width: 100%;
+        min-width: 0;
+        padding: 0 8px;
+        font-size: 11px;
+      }
+
+      #page-dashboard > .card {
+        border-radius: 14px;
+      }
+
+      #page-dashboard > .card > .card-header {
+        padding: 12px;
+      }
+
+      #page-dashboard .card-title {
+        flex-basis: 100%;
+        font-size: 11px;
+      }
+
+      #page-dashboard .drp-trigger {
+        width: 100%;
+        min-width: 0;
+      }
+
+      #dashCampTable {
+        margin: 0 -1px;
+      }
+
+      #dashCampTable table {
+        min-width: 920px;
+        font-size: 12px;
+      }
+
+      #dashCampTable th,
+      #dashCampTable td {
+        padding: 9px 10px;
+      }
+
+      .dashboard-pagination {
+        justify-content: flex-start;
+      }
+    }
+
     #dashCampTable .empty {
       min-height: 340px;
       display: grid;

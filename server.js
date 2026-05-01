@@ -91,6 +91,7 @@ const {
   FACEBOOK_GRAPH_API_VERSION,
   FINAL_SPEND_CRON,
   FINAL_SPEND_TIMEZONE,
+  TODAY_CAMPAIGN_SYNC_INTERVAL_MS,
   REDIS_URL,
   REDIS_QUEUE_ENABLED,
   REDIS_HOST,
@@ -1047,11 +1048,12 @@ async function fetchAccountData(account) {
     });
   }
 
-  await Campaign.deleteMany({
+  const staleCampaignResult = await Campaign.deleteMany({
     accountId: account._id,
     date: today,
     campaignId: { $nin: [...seenCampaignIds] }
   });
+  if (staleCampaignResult.deletedCount) clearCampaignReadCache();
 
   let unreadMessages = 0;
   try {
@@ -1216,6 +1218,8 @@ const accountTimers = {};
 const accountRuns = {};
 let facebookTokenCronTask = null;
 let finalSpendCronTask = null;
+let todayCampaignSpendSyncTimer = null;
+let todayCampaignSpendSyncRunning = false;
 let backgroundOrderSyncRunning = false;
 let isShuttingDown = false;
 let sheetRefreshTimer = null;
@@ -1471,6 +1475,77 @@ async function startAccountScheduler(account) {
     runAutoControlSafely(account, 'Scheduled');
   }, ms);
   runAutoControlSafely(account, 'Initial');
+}
+
+async function syncTodayCampaignSpendForAccount(account) {
+  const accountId = String(account._id);
+  if (!isMongoReady() || accountRuns[accountId]) return { skipped: true };
+
+  accountRuns[accountId] = true;
+  try {
+    await fetchAccountData(account);
+    await Account.findByIdAndUpdate(account._id, {
+      lastChecked: new Date(),
+      status: 'connected'
+    });
+    return { ok: true };
+  } catch (error) {
+    if (!isMongoReady()) return { skipped: true, error: error.message };
+
+    if (error.transient) {
+      if (error.rateLimited) {
+        await Account.findByIdAndUpdate(account._id, {
+          lastChecked: new Date(),
+          status: 'connected'
+        });
+      }
+      await addLog(account._id, account.name, 'warn', `Bo qua dong bo chi tieu hom nay tam thoi: ${error.message}`);
+      return { skipped: true, transient: true, error: error.message };
+    }
+
+    await Account.findByIdAndUpdate(account._id, { status: 'error' });
+    await addLog(account._id, account.name, 'error', `Loi dong bo chi tieu hom nay: ${error.message}`);
+    return { ok: false, error: error.message };
+  } finally {
+    delete accountRuns[accountId];
+  }
+}
+
+async function syncTodayCampaignSpendAllAccounts(source = 'timer') {
+  if (!isMongoReady() || todayCampaignSpendSyncRunning) return;
+
+  todayCampaignSpendSyncRunning = true;
+  try {
+    const accounts = await Account.find(buildAccountProviderFilter('facebook'));
+    let synced = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const account of accounts) {
+      if (isShuttingDown) break;
+      const result = await syncTodayCampaignSpendForAccount(account);
+      if (result?.ok) synced += 1;
+      else if (result?.skipped) skipped += 1;
+      else failed += 1;
+    }
+
+    console.log(`Today campaign spend sync (${source}): synced=${synced}, skipped=${skipped}, failed=${failed}`);
+  } catch (error) {
+    if (!isShuttingDown) {
+      console.error(`Today campaign spend sync failed: ${error.message}`);
+    }
+  } finally {
+    todayCampaignSpendSyncRunning = false;
+  }
+}
+
+function startTodayCampaignSpendSync() {
+  if (todayCampaignSpendSyncTimer) clearInterval(todayCampaignSpendSyncTimer);
+  console.log(`Today campaign spend sync scheduled every ${Math.round(TODAY_CAMPAIGN_SYNC_INTERVAL_MS / 1000)}s`);
+  setTimeout(() => syncTodayCampaignSpendAllAccounts('startup'), 5000);
+  todayCampaignSpendSyncTimer = setInterval(() => {
+    syncTodayCampaignSpendAllAccounts('timer');
+  }, TODAY_CAMPAIGN_SYNC_INTERVAL_MS);
 }
 
 function stopAccountScheduler(accountId) {
@@ -2943,6 +3018,7 @@ async function syncAccountHistoricalData(account, fromDate, toDate, options = {}
     }
     const result = await Campaign.deleteMany(pruneFilter);
     if (result.deletedCount) {
+      clearCampaignReadCache();
       await addLog(account._id, account.name, 'info', `Chot ngay ${fromDate}: xoa ${result.deletedCount} camp cu khong con trong snapshot`);
     }
   }
@@ -2971,6 +3047,13 @@ function getDateKeysInRange(fromDate, toDate) {
   return dates;
 }
 
+function assertPastCampaignSyncRange(fromDate, toDate) {
+  if (toDate >= todayStr()) {
+    throw new Error('Chi dong bo thu cong cac ngay truoc hom nay. Du lieu hom nay duoc cap nhat rieng va se duoc chot tu dong cuoi ngay.');
+  }
+  return getDateKeysInRange(fromDate, toDate);
+}
+
 function setSyncHistoryJob(jobId, updates) {
   const current = syncHistoryJobs.get(jobId);
   if (!current) return null;
@@ -2992,7 +3075,7 @@ async function runSyncHistoryJob(jobId, { fromDate, toDate, provider, accountId 
     if (!account) throw new Error('Khong tim thay tai khoan can dong bo');
     if (account.provider === 'shopee') throw new Error('Shopee khong can dong bo Meta insights');
 
-    const dates = getDateKeysInRange(fromDate, toDate);
+    const dates = assertPastCampaignSyncRange(fromDate, toDate);
     setSyncHistoryJob(jobId, {
       state: 'active',
       accountName: account.name,
@@ -3013,7 +3096,7 @@ async function runSyncHistoryJob(jobId, { fromDate, toDate, provider, accountId 
       });
 
       try {
-        const count = await syncAccountHistoricalData(account, dateKey, dateKey);
+        const count = await syncAccountHistoricalData(account, dateKey, dateKey, { prune: true });
         syncedRows += count;
         await addLog(account._id, account.name, 'success', `Dong bo ngay ${dateKey}: ${count} camp`);
       } catch (error) {
@@ -3058,7 +3141,7 @@ async function processCampaignSyncHistoryJob(data = {}, onProgress = null) {
   if (!account) throw new Error('Khong tim thay tai khoan can dong bo');
   if (account.provider === 'shopee') throw new Error('Shopee khong can dong bo Meta insights');
 
-  const dates = getDateKeysInRange(fromDate, toDate);
+  const dates = assertPastCampaignSyncRange(fromDate, toDate);
   const baseProgress = {
     state: 'active',
     accountId: String(account._id),
@@ -3093,7 +3176,7 @@ async function processCampaignSyncHistoryJob(data = {}, onProgress = null) {
     }
 
     try {
-      const count = await syncAccountHistoricalData(account, dateKey, dateKey);
+      const count = await syncAccountHistoricalData(account, dateKey, dateKey, { prune: true });
       syncedRows += count;
       await addLog(account._id, account.name, 'success', `Dong bo ngay ${dateKey}: ${count} camp`);
     } catch (error) {
@@ -3188,7 +3271,7 @@ app.post('/api/campaigns/sync-history', async (req, res) => {
       return res.status(400).json({ error: 'Chon 1 tai khoan truoc khi dong bo' });
     }
 
-    const dates = getDateKeysInRange(fromDate, toDate);
+    const dates = assertPastCampaignSyncRange(fromDate, toDate);
     if (!campaignSyncQueue) {
       return res.status(503).json({ error: 'Redis/BullMQ queue chua duoc bat. Cau hinh REDIS_URL hoac REDIS_QUEUE_ENABLED=true.' });
     }
@@ -3571,6 +3654,13 @@ async function cleanupCampaignDailyDuplicates() {
 
 async function ensureCampaignDailyStorage() {
   const campaignsCollection = mongoose.connection.collection('campaigns');
+  let indexes = [];
+  try {
+    indexes = await campaignsCollection.indexes();
+  } catch (error) {
+    if (error?.codeName !== 'NamespaceNotFound') throw error;
+  }
+  const hasDailyUniqueIndex = indexes.some(index => index.name === 'campaign_daily_unique');
 
   try {
     await campaignsCollection.dropIndex('campaign_id_1');
@@ -3579,9 +3669,22 @@ async function ensureCampaignDailyStorage() {
     // Index might not exist, that's fine.
   }
 
-  await cleanupCampaignDailyDuplicates();
+  if (!hasDailyUniqueIndex) {
+    await cleanupCampaignDailyDuplicates();
+  }
   await Campaign.createIndexes();
   console.log('Campaign daily indexes ready');
+}
+
+async function ensureApplicationIndexes() {
+  await Promise.all([
+    Account.createIndexes(),
+    Log.createIndexes(),
+    Order.createIndexes(),
+    FacebookPost.createIndexes(),
+    Config.createIndexes()
+  ]);
+  console.log('Application indexes ready');
 }
 
 async function migrateLegacyAccountProviders() {
@@ -3616,6 +3719,7 @@ mongoose.connect(MONGO_URI).then(() => {
     try {
       await migrateLegacyAccountProviders();
       await ensureCampaignDailyStorage();
+      await ensureApplicationIndexes();
     } catch (error) {
       console.error(`Startup storage maintenance failed: ${error.message}`);
     }
@@ -3628,6 +3732,7 @@ mongoose.connect(MONGO_URI).then(() => {
 
     facebookTokenCronTask = startFacebookTokenCron();
     finalSpendCronTask = startFinalSpendCron();
+    startTodayCampaignSpendSync();
     redisQueueAvailable = await checkRedisAvailable();
     initCampaignDuplicateQueue();
     initCampaignSyncQueue();
@@ -3693,6 +3798,9 @@ async function gracefulShutdown(signal) {
   }
   if (finalSpendCronTask) {
     finalSpendCronTask.stop();
+  }
+  if (todayCampaignSpendSyncTimer) {
+    clearInterval(todayCampaignSpendSyncTimer);
   }
   if (sheetRefreshTimer) {
     clearInterval(sheetRefreshTimer);

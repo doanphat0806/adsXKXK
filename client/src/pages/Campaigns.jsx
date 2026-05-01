@@ -10,6 +10,16 @@ function normalizeStatus(status) {
 
 const CAMPAIGNS_PER_PAGE = 500;
 
+function offsetDateString(dateKey, days) {
+  const date = new Date(`${dateKey}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().split('T')[0];
+}
+
+function yesterdayString() {
+  return offsetDateString(todayString(), -1);
+}
+
 export default function Campaigns() {
   const { provider, allAccounts } = useAppContext();
   const [campaigns, setCampaigns] = useState([]);
@@ -20,8 +30,8 @@ export default function Campaigns() {
   const [filterStatus, setFilterStatus] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
 
-  const [syncFromDate, setSyncFromDate] = useState(todayString());
-  const [syncToDate, setSyncToDate] = useState(todayString());
+  const [syncFromDate, setSyncFromDate] = useState(yesterdayString());
+  const [syncToDate, setSyncToDate] = useState(yesterdayString());
   const [syncing, setSyncing] = useState(false);
   const [syncJob, setSyncJob] = useState(null);
   const [exporting, setExporting] = useState(false);
@@ -77,9 +87,13 @@ export default function Campaigns() {
       toast.error('Chon 1 tai khoan truoc khi dong bo de tranh treo web');
       return;
     }
+    if (syncToDate >= todayString()) {
+      toast.error('Chi dong bo thu cong cac ngay truoc hom nay. Du lieu hom nay se duoc chot tu dong cuoi ngay.');
+      return;
+    }
 
     const accountName = allAccounts.find(account => account._id === filterAcc)?.name || filterAcc;
-    if (!window.confirm(`Dong bo chi tieu tai khoan ${accountName} tu ${syncFromDate} den ${syncToDate}?`)) return;
+    if (!window.confirm(`Dong bo du lieu da chot tai khoan ${accountName} tu ${syncFromDate} den ${syncToDate}?`)) return;
 
     setSyncing(true);
     setSyncJob(null);
@@ -130,6 +144,14 @@ export default function Campaigns() {
     window.location.href = apiUrl(`/reports/export-spending?${params.toString()}`);
     window.setTimeout(() => setExporting(false), 2000);
   };
+
+  const syncIncludesTodayOrFuture = syncToDate >= todayString();
+  const syncDisabled = syncing || provider === 'shopee' || !filterAcc || syncIncludesTodayOrFuture;
+  const syncButtonTitle = !filterAcc
+    ? 'Chon 1 tai khoan truoc khi dong bo'
+    : syncIncludesTodayOrFuture
+      ? 'Chi dong bo thu cong cac ngay truoc hom nay'
+      : '';
 
   const filteredCampaigns = useMemo(() => {
     let result = campaigns;
@@ -204,11 +226,11 @@ export default function Campaigns() {
 
       <div className="card section-gap" style={{ borderLeft: '4px solid var(--b)' }}>
         <div className="card-header">
-          <div className="card-title">Báo cáo & Đồng bộ lịch sử</div>
+          <div className="card-title">Bao cao & Dong bo ngay da chot</div>
         </div>
         <div style={{ padding: '16px 18px', display: 'flex', gap: '15px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
           <div className="form-group" style={{ margin: 0 }}>
-            <label style={{ display: 'block', fontSize: '11px', color: 'var(--muted2)', marginBottom: '4px', fontWeight: '700', textTransform: 'uppercase' }}>Chọn khoảng thời gian</label>
+            <label style={{ display: 'block', fontSize: '11px', color: 'var(--muted2)', marginBottom: '4px', fontWeight: '700', textTransform: 'uppercase' }}>Chon ngay truoc hom nay</label>
             <DateRangePicker 
               fromDate={syncFromDate} 
               toDate={syncToDate} 
@@ -222,11 +244,11 @@ export default function Campaigns() {
           <button 
             className="btn btn-primary" 
             onClick={handleSyncHistoryQueued}
-            disabled={syncing || provider === 'shopee' || !filterAcc}
+            disabled={syncDisabled}
             style={{ height: '38px' }}
-            title={!filterAcc ? 'Chọn 1 tài khoản trước khi đồng bộ' : ''}
+            title={syncButtonTitle}
           >
-            {syncing ? 'Đang đồng bộ...' : '🔄 Đồng bộ chi tiêu'}
+            {syncing ? 'Dang dong bo...' : 'Dong bo ngay da chot'}
           </button>
           <button 
             className="btn btn-success" 

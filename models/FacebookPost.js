@@ -19,5 +19,6 @@ const FacebookPostSchema = new mongoose.Schema({
 });
 FacebookPostSchema.index({ pageId: 1, createdTime: -1 });
 FacebookPostSchema.index({ createdTime: -1, fetchedAt: -1 }, { name: 'post_created_fetched_desc' });
+FacebookPostSchema.index({ pageId: 1, createdTime: -1, fetchedAt: -1 }, { name: 'post_page_created_fetched_desc' });
 
 module.exports = mongoose.model('FacebookPost', FacebookPostSchema);

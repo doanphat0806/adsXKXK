@@ -15,4 +15,9 @@ const AccountSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
+AccountSchema.index({ provider: 1, createdAt: -1 }, { name: 'account_provider_createdAt' });
+AccountSchema.index({ provider: 1, status: 1 }, { name: 'account_provider_status' });
+AccountSchema.index({ provider: 1, adAccountId: 1 }, { name: 'account_provider_adAccountId' });
+AccountSchema.index({ autoEnabled: 1 }, { name: 'account_autoEnabled' });
+
 module.exports = mongoose.model('Account', AccountSchema);

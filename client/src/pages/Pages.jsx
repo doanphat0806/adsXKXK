@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+﻿import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { api } from '../lib/api';
 import { useAppContext } from '../contexts/AppContext';
 import { toast } from 'react-toastify';
@@ -16,6 +16,7 @@ const SHOPEE_DEFAULT_BID_AMOUNT = 500;
 const SHOPEE_DEFAULT_AGE_MIN = 20;
 const SHOPEE_DEFAULT_AGE_MAX = 44;
 const AD_NAME_PREFIX_OPTIONS = ['PHAT', 'BINH', 'HIEU'];
+const AD_STATUS_OPTIONS = ['Sale', 'Sẵn', 'Win', 'Test'];
 
 function getDefaultCampaignStartTime() {
   const start = new Date(Date.now() + 7 * 60 * 60 * 1000);
@@ -117,6 +118,7 @@ export default function CreateCampaign() {
   const [accountQuery, setAccountQuery] = useState('');
   const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
   const [adNamePrefix, setAdNamePrefix] = useState(AD_NAME_PREFIX_OPTIONS[0]);
+  const [adNameStatus, setAdNameStatus] = useState('Test');
   const [campaignCodes, setCampaignCodes] = useState('');
   const [campaignLinks, setCampaignLinks] = useState('');
   const [dailyBudget, setDailyBudget] = useState(
@@ -224,20 +226,20 @@ export default function CreateCampaign() {
     }
   };
 
-  // ── Load Pages ──
+  // â”€â”€ Load Pages â”€â”€
   const loadPages = useCallback(async () => {
     setLoadingPages(true);
     try {
       const data = await api('GET', '/pages');
       setPages(data.pages || []);
     } catch (e) {
-      toast.error('Lỗi tải Pages: ' + e.message);
+      toast.error('Loi tai Pages: ' + e.message);
     } finally {
       setLoadingPages(false);
     }
   }, []);
 
-  // ── Load ALL posts from ALL pages ──
+  // â”€â”€ Load ALL posts from ALL pages â”€â”€
   const loadSavedPosts = useCallback(async (options = {}) => {
     const { silent = false } = options;
     if (allPostsLoadingRef.current) return;
@@ -275,7 +277,7 @@ export default function CreateCampaign() {
       const data = await api('GET', path);
       setAllPosts(data.posts || []);
       setVisiblePostCount(postsPerPageLimit);
-      if (!silent) toast.success(`Đã tải ${data.total} bài viết từ ${data.pageCount} Pages`);
+      if (!silent) toast.success(`Da tai ${data.total} bai viet tu ${data.pageCount} Pages`);
     } catch (e) {
       if (!silent) {
         if (isPagePostPermissionError(e)) {
@@ -300,10 +302,10 @@ export default function CreateCampaign() {
     return () => clearInterval(interval);
   }, [loadPages, loadSavedPosts]);
 
-  // ── Load Posts for a specific Page ──
+  // â”€â”€ Load Posts for a specific Page â”€â”€
   const selectPage = async (page) => {
     if (selectedPage?.id === page.id) {
-      // Deselect → show all
+      // Deselect â†’ show all
       setSelectedPage(null);
       setPagePosts([]);
       setVisiblePostCount(postsPerPageLimit);
@@ -368,25 +370,25 @@ export default function CreateCampaign() {
     const codes = splitNonEmptyLines(codesPayload);
 
     if (!selectedAccountId) {
-      toast.error('Chọn tài khoản quảng cáo trước');
+      toast.error('Chon tai khoan quang cao truoc');
       return;
     }
     if (selectedProvider === 'shopee' && !hasLegacyShopeeRows) {
       if (!campaignNameLines.length) {
-        toast.error('Nhập tên camp');
+        toast.error('Nhap ten camp');
         return;
       }
       if (!productLinkLines.length) {
-        toast.error('Nhập link sản phẩm Shopee');
+        toast.error('Nhap link san pham Shopee');
         return;
       }
       if (campaignNameLines.length !== productLinkLines.length) {
-        toast.error('Số dòng tên camp phải bằng số dòng link sản phẩm');
+        toast.error('So dong ten camp phai bang so dong link san pham');
         return;
       }
     }
     if (!codes.length) {
-      toast.error('Nhập ít nhất một mã sản phẩm');
+      toast.error('Nhap it nhat mot ma san pham');
       return;
     }
 
@@ -400,26 +402,26 @@ export default function CreateCampaign() {
         startTime: campaignStartTime,
         ageMin,
         ageMax,
-        ...(selectedProvider === 'shopee' ? { bidAmount } : { adNamePrefix }),
+        ...(selectedProvider === 'shopee' ? { bidAmount } : { adNamePrefix, adNameStatus }),
         pageId: selectedPage?.id || ''
       }, {
         timeoutMs: 15 * 60 * 1000
       });
       setCampaignCreateResult(result);
       if (result.created?.length) {
-        toast.success(`Đã tạo ${result.created.length} camp active, bắt đầu ${result.startTimeDisplay || '06:00 ngày mai'}`);
+        toast.success(`Da tao ${result.created.length} camp active, bat dau ${result.startTimeDisplay || '06:00 ngay mai'}`);
         loadTodayCampaigns();
       }
       if (result.errors?.length) {
         const firstError = result.errors[0]?.error || '';
         if (!result.created?.length && firstError) {
-          toast.error(`Lỗi tạo camp: ${firstError}`);
+          toast.error(`Loi tao camp: ${firstError}`);
         } else {
-          toast.warn(`${result.errors.length} mã chưa tạo được`);
+          toast.warn(`${result.errors.length} ma chua tao duoc`);
         }
       }
     } catch (e) {
-      toast.error('Lỗi tạo camp: ' + e.message);
+      toast.error('Loi tao camp: ' + e.message);
     } finally {
       setCreatingCampaigns(false);
     }
@@ -469,13 +471,13 @@ export default function CreateCampaign() {
   }, [hasShopeePageScope, pages, searchPage, selectedProvider, shopeeLinkedPageIdSet]);
 
   const truncateText = (text, max = 120) => {
-    if (!text) return 'Không có nội dung';
+    if (!text) return 'Khong co noi dung';
     return text.length > max ? text.substring(0, max) + '...' : text;
   };
 
   const formatDate = (d) => {
-    if (!d) return '—';
-    return new Date(d).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
+    if (!d) return '-';
+    return new Date(d).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh', hour12: false });
   };
 
   const campaignFormColumns = selectedProvider === 'shopee'
@@ -487,9 +489,9 @@ export default function CreateCampaign() {
       <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: '16px', minHeight: 'calc(100vh - 140px)' }}>
         <div className="card" style={{ gridColumn: '1 / -1', overflow: 'visible' }}>
           <div className="card-header">
-            <div className="card-title">Tạo camp từ mã sản phẩm</div>
+            <div className="card-title">Tao camp tu ma san pham</div>
             <button className="btn btn-g btn-sm" onClick={createCampaignsFromCodes} disabled={creatingCampaigns}>
-              {creatingCampaigns ? 'Đang tạo...' : 'Tạo camp'}
+              {creatingCampaigns ? 'Dang tao...' : 'Tao camp'}
             </button>
           </div>
           <div
@@ -497,7 +499,7 @@ export default function CreateCampaign() {
             style={{ gridTemplateColumns: campaignFormColumns }}
           >
             <div className="form-group campaign-codes-field" style={{ marginBottom: 0 }}>
-              <label>Tài khoản quảng cáo</label>
+              <label>Tai khoan quang cao</label>
               <div className="account-combobox">
                 <input
                   type="text"
@@ -514,7 +516,7 @@ export default function CreateCampaign() {
                     }, 120);
                   }}
                   onKeyDown={handleAccountInputKeyDown}
-                  placeholder="Gõ tên, ví dụ: XK 2 57"
+                  placeholder="Go ten, vi du: XK 2 57"
                   autoComplete="off"
                 />
                 {isAccountMenuOpen && (
@@ -535,29 +537,29 @@ export default function CreateCampaign() {
                         </button>
                       ))
                     ) : (
-                      <div className="account-combobox-empty">Không tìm thấy tài khoản</div>
+                      <div className="account-combobox-empty">Khong tim thay tai khoan</div>
                     )}
                   </div>
                 )}
               </div>
               {selectedAccount && (
                 <div className="selected-account-pill">
-                  Đang chọn: {selectedAccount.name}
+                  Dang chon: {selectedAccount.name}
                 </div>
               )}
               <select
                 value={selectedAccountId}
                 onChange={e => setSelectedAccountId(e.target.value)}
                 style={{ display: 'none' }}
-                title="Focus vào ô này rồi gõ tên tài khoản, ví dụ XK 2 57"
+                title="Focus vao o nay roi go ten tai khoan, vi du XK 2 57"
               >
-                <option value="">Chọn tài khoản</option>
+                <option value="">Chon tai khoan</option>
                 {allAccounts.map(account => (
                   <option key={account._id} value={account._id}>{account.name} - {account.adAccountId}</option>
                 ))}
               </select>
               {quickAccountOptions.length > 0 && (
-                <div className="quick-account-row" aria-label="Chọn nhanh tài khoản">
+                <div className="quick-account-row" aria-label="Chon nhanh tai khoan">
                   {quickAccountOptions.map(account => (
                     <button
                       key={account._id}
@@ -574,7 +576,7 @@ export default function CreateCampaign() {
             </div>
             {selectedProvider !== 'shopee' && (
               <div className="form-group" style={{ marginBottom: 0 }}>
-                <label>Mã nhân viên</label>
+                <label>Ma nhan vien</label>
                 <select value={adNamePrefix} onChange={e => setAdNamePrefix(e.target.value)}>
                   {AD_NAME_PREFIX_OPTIONS.map(name => (
                     <option key={name} value={name}>{name}</option>
@@ -583,29 +585,29 @@ export default function CreateCampaign() {
               </div>
             )}
             <div className="form-group campaign-codes-field" style={{ marginBottom: 0 }}>
-              <label>{selectedProvider === 'shopee' ? 'Tên camp' : 'List mã sản phẩm'}</label>
+              <label>{selectedProvider === 'shopee' ? 'Ten camp' : 'List ma san pham'}</label>
               <textarea
                 rows="3"
                 value={campaignCodes}
                 onChange={e => setCampaignCodes(e.target.value)}
                 placeholder={selectedProvider === 'shopee'
-                  ? 'Mỗi dòng một tên camp, ví dụ: Váy xếp ly'
-                  : 'Mỗi dòng một mã, ví dụ: XK01'}
+                  ? 'Moi dong mot ten camp, vi du: Vay xep ly'
+                  : 'Moi dong mot ma, vi du: XK01'}
               />
             </div>
             {selectedProvider === 'shopee' && (
               <div className="form-group campaign-codes-field" style={{ marginBottom: 0 }}>
-                <label>Link sản phẩm</label>
+                <label>Link san pham</label>
                 <textarea
                   rows="3"
                   value={campaignLinks}
                   onChange={e => setCampaignLinks(e.target.value)}
-                  placeholder="Mỗi dòng một link, ví dụ: https://s.shopee.vn/5AmboEuNpt"
+                  placeholder="Moi dong mot link, vi du: https://s.shopee.vn/5AmboEuNpt"
                 />
               </div>
             )}
             <div className="form-group" style={{ marginBottom: 0 }}>
-              <label>Ngân sách/ngày</label>
+              <label>Ngan sach/ngay</label>
               <input
                 type="number"
                 min="1000"
@@ -613,10 +615,20 @@ export default function CreateCampaign() {
                 value={dailyBudget}
                 onChange={e => setDailyBudget(Number(e.target.value || 0))}
               />
+              {selectedProvider !== 'shopee' && (
+                <>
+                  <label style={{ marginTop: '8px' }}>Trạng thái</label>
+                  <select value={adNameStatus} onChange={e => setAdNameStatus(e.target.value)}>
+                    {AD_STATUS_OPTIONS.map(status => (
+                      <option key={status} value={status}>{status}</option>
+                    ))}
+                  </select>
+                </>
+              )}
             </div>
             {selectedProvider === 'shopee' && (
               <div className="form-group" style={{ marginBottom: 0 }}>
-                <label>Số bid</label>
+                <label>So bid</label>
                 <input
                   type="number"
                   min="1"
@@ -627,7 +639,7 @@ export default function CreateCampaign() {
               </div>
             )}
             <div className="form-group" style={{ marginBottom: 0 }}>
-              <label>Thời gian bắt đầu (giờ VN)</label>
+              <label>Thoi gian bat dau (gio VN)</label>
               <input
                 type="datetime-local"
                 value={campaignStartTime}
@@ -635,7 +647,7 @@ export default function CreateCampaign() {
               />
             </div>
             <div className="form-group" style={{ marginBottom: 0 }}>
-              <label>Tuổi từ</label>
+              <label>Tuoi tu</label>
               <input
                 type="number"
                 min="13"
@@ -645,7 +657,7 @@ export default function CreateCampaign() {
               />
             </div>
             <div className="form-group" style={{ marginBottom: 0 }}>
-              <label>Tuổi đến</label>
+              <label>Tuoi den</label>
               <input
                 type="number"
                 min="13"
@@ -659,7 +671,7 @@ export default function CreateCampaign() {
             <div style={{ borderTop: '1px solid var(--border)', padding: '10px 16px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
               <div>
                 <div style={{ fontSize: '12px', fontWeight: 700, color: 'var(--g)', marginBottom: '6px' }}>
-                  Đã tạo: {campaignCreateResult.created?.length || 0}
+                  Da tao: {campaignCreateResult.created?.length || 0}
                 </div>
                 {(campaignCreateResult.created || []).map(item => (
                   <div key={`${item.code}-${item.campaignId}`} style={{ fontSize: '11px', color: 'var(--muted2)', fontFamily: 'var(--mono)', marginBottom: '4px' }}>
@@ -669,7 +681,7 @@ export default function CreateCampaign() {
               </div>
               <div>
                 <div style={{ fontSize: '12px', fontWeight: 700, color: 'var(--r)', marginBottom: '6px' }}>
-                  Lỗi: {campaignCreateResult.errors?.length || 0}
+                  Loi: {campaignCreateResult.errors?.length || 0}
                 </div>
                 {(campaignCreateResult.errors || []).map(item => (
                   <div key={`${item.code}-${item.error}`} style={{ fontSize: '11px', color: 'var(--muted2)', fontFamily: 'var(--mono)', marginBottom: '4px' }}>
@@ -681,12 +693,12 @@ export default function CreateCampaign() {
           )}
         </div>
 
-        {/* ── Left: Pages List ── */}
+        {/* â”€â”€ Left: Pages List â”€â”€ */}
         <div className="card" style={{ display: 'flex', flexDirection: 'column', maxHeight: 'calc(100vh - 140px)' }}>
           <div className="card-header" style={{ flexShrink: 0 }}>
             <div className="card-title">Pages ({filteredPages.length})</div>
             <button className="btn btn-ghost btn-sm" onClick={loadPages} disabled={loadingPages}>
-              {loadingPages ? '⟳' : '↺'}
+              {loadingPages ? '...' : 'Lam moi'}
             </button>
           </div>
 
@@ -694,7 +706,7 @@ export default function CreateCampaign() {
           <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
             <input
               type="text"
-              placeholder="Tìm tên Page..."
+              placeholder="Tim ten Page..."
               value={searchPage}
               onChange={e => setSearchPage(e.target.value)}
               style={{
@@ -726,13 +738,13 @@ export default function CreateCampaign() {
                 transition: 'all 0.15s'
               }}
             >
-              <span style={{ fontSize: '14px' }}>🌐</span>
+              <span style={{ fontSize: '14px' }}>ALL</span>
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: '13px', fontWeight: 600, color: !selectedPage ? 'var(--b)' : 'var(--txt)' }}>
-                  {selectedProvider === 'shopee' ? 'Pages đã chọn' : 'Tất cả Pages'}
+                  {selectedProvider === 'shopee' ? 'Pages da chon' : 'Tat ca Pages'}
                 </div>
                 <div style={{ fontSize: '10px', color: 'var(--muted2)', fontFamily: 'var(--mono)' }}>
-                  {scopedAllPosts.length} bài viết
+                  {scopedAllPosts.length} bai viet
                 </div>
               </div>
             </div>
@@ -742,16 +754,16 @@ export default function CreateCampaign() {
           <div style={{ flex: 1, overflowY: 'auto', padding: '0 8px 8px' }}>
             {loadingPages ? (
               <div className="empty">
-                <span className="spin">⟳</span>
-                <p style={{ marginTop: '10px' }}>Đang tải Pages...</p>
+                <span className="spin">...</span>
+                <p style={{ marginTop: '10px' }}>Dang tai Pages...</p>
               </div>
             ) : filteredPages.length === 0 ? (
               <div className="empty">
-                <div className="ei">📄</div>
+                <div className="ei">PAGE</div>
                 <p>
                   {selectedProvider === 'shopee' && !hasShopeePageScope
-                    ? 'Chưa chọn Fanpage cho tài khoản Shopee'
-                    : 'Không tìm thấy Page nào'}
+                    ? 'Chua chon Fanpage cho tai khoan Shopee'
+                    : 'Khong tim thay Page nao'}
                 </p>
               </div>
             ) : (
@@ -795,7 +807,7 @@ export default function CreateCampaign() {
                     {page.picture?.data?.url ? (
                       <img src={page.picture.data.url} alt="" loading="lazy" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                     ) : (
-                      <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '14px' }}>📄</div>
+                      <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '14px' }}>PAGE</div>
                     )}
                   </div>
 
@@ -811,7 +823,7 @@ export default function CreateCampaign() {
                       {page.name}
                     </div>
                     <div style={{ fontSize: '10px', color: 'var(--muted2)', fontFamily: 'var(--mono)' }}>
-                      {page.category || 'Page'} {page.fan_count ? `· ${Number(page.fan_count).toLocaleString()} likes` : ''}
+                      {page.category || 'Page'} {page.fan_count ? `Â· ${Number(page.fan_count).toLocaleString()} likes` : ''}
                     </div>
                   </div>
                 </div>
@@ -820,11 +832,11 @@ export default function CreateCampaign() {
           </div>
         </div>
 
-        {/* ── Right: Posts ── */}
+        {/* â”€â”€ Right: Posts â”€â”€ */}
         <div className="card" style={{ display: 'flex', flexDirection: 'column', maxHeight: 'calc(100vh - 140px)' }}>
           <div className="card-header" style={{ flexShrink: 0 }}>
             <div className="card-title" style={{ gap: '12px' }}>
-              <span>{selectedPage ? `Bài viết — ${selectedPage.name}` : 'Tất cả bài viết'}</span>
+              <span>{selectedPage ? `Bai viet - ${selectedPage.name}` : 'Tat ca bai viet'}</span>
               <span style={{
                 background: 'var(--s3)',
                 padding: '2px 8px',
@@ -833,18 +845,18 @@ export default function CreateCampaign() {
                 fontSize: '10px',
                 color: 'var(--muted2)'
               }}>
-                {displayPosts.length} bài
+                {displayPosts.length} bai
               </span>
             </div>
             <div style={{ display: 'flex', gap: '8px' }}>
               {!selectedPage && (
                 <button className="btn btn-ghost btn-sm" onClick={() => loadAllPosts(true)} disabled={loadingAllPosts}>
-                  {loadingAllPosts ? '⟳ Đang tải...' : '↺ Cập nhật FB'}
+                  {loadingAllPosts ? '... Dang tai...' : 'Cap nhat FB'}
                 </button>
               )}
               {selectedPage && (
                 <button className="btn btn-ghost btn-sm" onClick={showAllPages}>
-                  ← Xem tất cả
+                  Xem tat ca
                 </button>
               )}
             </div>
@@ -854,7 +866,7 @@ export default function CreateCampaign() {
           <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
             <input
               type="text"
-              placeholder="Tìm bài viết theo nội dung, tên page, ID..."
+              placeholder="Tim bai viet theo noi dung, ten page, ID..."
               value={searchPost}
               onChange={e => setSearchPost(e.target.value)}
               style={{
@@ -873,13 +885,13 @@ export default function CreateCampaign() {
           <div style={{ flex: 1, overflowY: 'auto', padding: '12px' }}>
             {isLoadingDisplay ? (
               <div className="empty">
-                <span className="spin">⟳</span>
-                <p style={{ marginTop: '10px' }}>Đang tải bài viết...</p>
+                <span className="spin">...</span>
+                <p style={{ marginTop: '10px' }}>Dang tai bai viet...</p>
               </div>
             ) : displayPosts.length === 0 ? (
               <div className="empty">
-                <div className="ei">📝</div>
-                <p>Không có bài viết nào</p>
+                <div className="ei">POST</div>
+                <p>Khong co bai viet nao</p>
               </div>
             ) : (
               <>
@@ -973,9 +985,9 @@ export default function CreateCampaign() {
                         color: 'var(--muted2)',
                         marginBottom: '8px'
                       }}>
-                        <span>👍 {post.likes}</span>
-                        <span>💬 {post.comments}</span>
-                        <span>🔄 {post.shares}</span>
+                        <span>Like {post.likes}</span>
+                        <span>Comment {post.comments}</span>
+                        <span>Share {post.shares}</span>
                       </div>
 
                       {/* Date & link */}
@@ -1007,7 +1019,7 @@ export default function CreateCampaign() {
                             }}
                             onClick={e => e.stopPropagation()}
                           >
-                            Xem trên FB ↗
+                            Xem tren FB
                           </a>
                         )}
                       </div>
@@ -1035,7 +1047,7 @@ export default function CreateCampaign() {
                     className="btn btn-ghost btn-sm"
                     onClick={() => setVisiblePostCount(count => count + postsPerPageLimit)}
                   >
-                    Xem thêm {Math.min(postsPerPageLimit, displayPosts.length - visiblePosts.length)} bài
+                    Xem them {Math.min(postsPerPageLimit, displayPosts.length - visiblePosts.length)} bai
                   </button>
                 </div>
               )}

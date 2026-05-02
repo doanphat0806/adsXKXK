@@ -1,36 +1,46 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api, timeString } from '../lib/api';
 import { toast } from 'react-toastify';
+import { useAppContext } from '../contexts/AppContext';
 
 export default function Logs() {
+  const { provider } = useAppContext();
+  const [selectedProvider, setSelectedProvider] = useState(provider);
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(false);
+
+  const providerLabel = selectedProvider === 'shopee' ? 'Shopee' : 'Facebook';
 
   const fetchLogs = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api('GET', '/logs?limit=200');
+      const data = await api('GET', `/logs?provider=${encodeURIComponent(selectedProvider)}&limit=200`);
       setLogs(data);
-    } catch (e) {
-      toast.error('Lỗi tải nhật ký');
+    } catch {
+      toast.error('Loi tai nhat ky');
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
-  }, []);
+  }, [selectedProvider]);
 
   const clearLogs = async () => {
-    if (!confirm('Xóa tất cả nhật ký?')) return;
+    if (!confirm(`Xoa tat ca nhat ky ${providerLabel}?`)) return;
     try {
-      await api('DELETE', '/logs');
+      await api('DELETE', `/logs?provider=${encodeURIComponent(selectedProvider)}`);
       setLogs([]);
-      toast.success('Đã xóa nhật ký');
+      toast.success(`Da xoa nhat ky ${providerLabel}`);
     } catch (e) {
-      toast.error('Lỗi: ' + e.message);
+      toast.error('Loi: ' + e.message);
     }
   };
 
   useEffect(() => {
+    setSelectedProvider(provider);
+  }, [provider]);
+
+  useEffect(() => {
     fetchLogs();
-    const interval = setInterval(fetchLogs, 30000); // Tải lại mỗi 30s
+    const interval = setInterval(fetchLogs, 30000);
     return () => clearInterval(interval);
   }, [fetchLogs]);
 
@@ -46,28 +56,44 @@ export default function Logs() {
 
   return (
     <div id="page-logs">
-      <div className="filter-row" style={{ display: 'flex', gap: '10px', marginBottom: '14px', justifyContent: 'flex-end' }}>
-        <button className="btn btn-ghost btn-sm" onClick={fetchLogs}>↺ Làm mới</button>
-        <button className="btn btn-ghost btn-sm" style={{ color: 'var(--r)' }} onClick={clearLogs}>🗑 Xóa tất cả</button>
+      <div className="filter-row" style={{ display: 'flex', gap: '10px', marginBottom: '14px', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button
+            className={`btn btn-sm ${selectedProvider === 'facebook' ? 'btn-g' : 'btn-ghost'}`}
+            onClick={() => setSelectedProvider('facebook')}
+          >
+            Facebook
+          </button>
+          <button
+            className={`btn btn-sm ${selectedProvider === 'shopee' ? 'btn-g' : 'btn-ghost'}`}
+            onClick={() => setSelectedProvider('shopee')}
+          >
+            Shopee
+          </button>
+        </div>
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button className="btn btn-ghost btn-sm" onClick={fetchLogs}>Lam moi</button>
+          <button className="btn btn-ghost btn-sm" style={{ color: 'var(--r)' }} onClick={clearLogs}>Xoa {providerLabel}</button>
+        </div>
       </div>
 
       <div className="card">
         <div className="card-header">
-          <div className="card-title">Nhật ký hệ thống ({logs.length})</div>
+          <div className="card-title">Nhat ky {providerLabel} ({logs.length})</div>
         </div>
         <div className="tbl-wrap">
           {loading && logs.length === 0 ? (
-            <div className="empty"><span className="spin">⟳</span><p>Đang tải...</p></div>
+            <div className="empty"><span className="spin">...</span><p>Dang tai...</p></div>
           ) : logs.length === 0 ? (
-            <div className="empty"><div className="ei">📋</div><p>Chưa có nhật ký nào</p></div>
+            <div className="empty"><div className="ei">LOG</div><p>Chua co nhat ky nao</p></div>
           ) : (
             <table className="tbl" style={{ fontSize: '12px' }}>
               <thead>
                 <tr>
-                  <th style={{ width: '160px' }}>Thời gian</th>
-                  <th style={{ width: '180px' }}>Tài khoản</th>
-                  <th style={{ width: '80px' }}>Mức độ</th>
-                  <th>Nội dung</th>
+                  <th style={{ width: '160px' }}>Thoi gian</th>
+                  <th style={{ width: '180px' }}>Tai khoan</th>
+                  <th style={{ width: '80px' }}>Muc do</th>
+                  <th>Noi dung</th>
                 </tr>
               </thead>
               <tbody>
@@ -77,7 +103,7 @@ export default function Logs() {
                     <td style={{ fontWeight: 600 }}>{log.accountName || 'System'}</td>
                     <td>
                       <span className={`badge-mini ${log.level}`}>
-                        {log.level.toUpperCase()}
+                        {String(log.level || '').toUpperCase()}
                       </span>
                     </td>
                     <td className={getLevelClass(log.level)} style={{ wordBreak: 'break-word' }}>

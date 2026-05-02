@@ -156,6 +156,9 @@ async function addLog(accountId, accountName, level, message) {
 
 const READ_CACHE_TTL_MS = 30 * 1000;
 const readCache = new Map();
+const ACCOUNT_RATE_LIMIT_COOLDOWN_MS = parseBoundedInt(process.env.ACCOUNT_RATE_LIMIT_COOLDOWN_MS, 10 * 60 * 1000, 60 * 1000, 60 * 60 * 1000);
+const AUTO_CHECK_MIN_INTERVAL_SECONDS = parseBoundedInt(process.env.AUTO_CHECK_MIN_INTERVAL_SECONDS, 180, 60, 60 * 60);
+const accountRateLimitUntil = new Map();
 
 function getReadCache(key) {
   const cached = readCache.get(key);
@@ -294,10 +297,16 @@ function getPostPageId(post = {}) {
   return '';
 }
 
-function buildAdName(code, prefix = DEFAULT_AD_NAME_PREFIX) {
+function normalizeAdNameStatus(value) {
+  const raw = String(value || 'Test').trim();
+  const allowed = ['Sale', 'Săn', 'Win', 'Test'];
+  return allowed.find(item => item.toLowerCase() === raw.toLowerCase()) || 'Test';
+}
+
+function buildAdName(code, prefix = DEFAULT_AD_NAME_PREFIX, status = 'Test') {
   const cleanCode = String(code || '').replace(/\s+/g, ' ').trim();
   const productLabel = `${DEFAULT_POST_LABEL_PREFIX} ${cleanCode}`;
-  return `${String(prefix || DEFAULT_AD_NAME_PREFIX).trim()}__${productLabel}__Test`;
+  return `${String(prefix || DEFAULT_AD_NAME_PREFIX).trim()}__${productLabel}__${normalizeAdNameStatus(status)}`;
 }
 
 async function buildAccountPayload(input = {}) {
@@ -486,9 +495,24 @@ async function getAutoCheckIntervalSeconds(account) {
   const config = await getAppConfig();
   const ruleStart = config?.autoRuleStartTime || '00:00';
   const ruleEnd = config?.autoRuleEndTime || '09:00';
+  const minInterval = account.provider === 'shopee' ? 60 : AUTO_CHECK_MIN_INTERVAL_SECONDS;
   return isWithinAutoRuleTimeWindow(ruleStart, ruleEnd)
-    ? Number(account.checkInterval || 60)
+    ? Math.max(Number(account.checkInterval || minInterval), minInterval)
     : 300;
+}
+
+function getAccountRateLimitDelayMs(accountId) {
+  const until = accountRateLimitUntil.get(String(accountId)) || 0;
+  const remaining = until - Date.now();
+  if (remaining <= 0) {
+    accountRateLimitUntil.delete(String(accountId));
+    return 0;
+  }
+  return remaining;
+}
+
+function markAccountRateLimited(accountId) {
+  accountRateLimitUntil.set(String(accountId), Date.now() + ACCOUNT_RATE_LIMIT_COOLDOWN_MS);
 }
 
 function getFacebookOAuthRedirectUri(req) {
@@ -980,7 +1004,10 @@ function getPauseReason(provider, spend, messages, costPerMessage, clicks, costP
   const limitHighCostPerMsg = isDaily ? limits.dailyHighCostPerMessageLimit : limits.lifetimeHighCostPerMessageLimit;
   const limitHighCostSpend = isDaily ? limits.dailyHighCostSpendLimit : limits.lifetimeHighCostSpendLimit;
   const limitClicks = isDaily ? limits.dailyClickLimit : limits.lifetimeClickLimit;
-  const limitCpc = isDaily ? limits.dailyCpcLimit : limits.lifetimeCpcLimit;
+  const configuredLimitCpc = isDaily ? limits.dailyCpcLimit : limits.lifetimeCpcLimit;
+  const limitCpc = normalizedProvider === 'shopee'
+    ? Number(configuredLimitCpc || 600)
+    : configuredLimitCpc;
 
   if (normalizedProvider === 'shopee') {
     if (limitCpc > 0 && costPerClick > limitCpc) {
@@ -1027,9 +1054,71 @@ function getCampaignMessageStats(campaign) {
   return { spend, messages, costPerMessage };
 }
 
+function getCampaignRuleStats(campaign) {
+  const insight = campaign.insights?.data?.[0] || {};
+  const spend = parseFloat(campaign.spend ?? insight.spend ?? 0);
+  const messages = parseInt(campaign.messages ?? 0, 10);
+  const clicks = parseInt(campaign.clicks ?? insight.clicks ?? 0, 10);
+  const costPerMessage = messages > 0 ? spend / messages : 0;
+  const costPerClick = clicks > 0 ? spend / clicks : 0;
+
+  return { spend, messages, costPerMessage, clicks, costPerClick };
+}
+
 async function fetchShopeeAccountData(account) {
   const today = todayStr();
-  const campaigns = await Campaign.find({ accountId: account._id, date: today }).lean();
+  let campaigns = await Campaign.find({ accountId: account._id, date: today }).lean();
+  const { fbToken } = await getEffectiveSecrets(account);
+  if (fbToken) {
+    const insights = await fetchAccountInsightsInRange(account, today, today);
+    const metricInsights = [];
+    const campaignIds = new Set();
+    for (const insight of insights) {
+      if (!insight.campaign_id) continue;
+      const spend = parseFloat(insight.spend || 0);
+      const impressions = parseInt(insight.impressions || 0, 10);
+      const clicks = parseInt(insight.clicks || 0, 10);
+      if (spend <= 0 && impressions <= 0 && clicks <= 0) continue;
+      metricInsights.push({ ...insight, spend, impressions, clicks });
+      campaignIds.add(String(insight.campaign_id));
+    }
+
+    const campaignMetaById = new Map();
+    for (const chunk of chunkArray([...campaignIds], 50)) {
+      const metaResponse = await fbGet(fbToken, '', {
+        ids: chunk.join(','),
+        fields: 'id,name,status,daily_budget,lifetime_budget,created_time'
+      });
+      for (const campaign of Object.values(metaResponse || {})) {
+        if (!campaign?.id) continue;
+        const isLifetime = !!campaign.lifetime_budget && parseFloat(campaign.lifetime_budget) > 0;
+        campaignMetaById.set(String(campaign.id), {
+          name: campaign.name,
+          status: campaign.status,
+          dailyBudget: isLifetime ? 0 : parseFloat(campaign.daily_budget || 0),
+          lifetimeBudget: isLifetime ? parseFloat(campaign.lifetime_budget || 0) : 0,
+          budgetType: isLifetime ? 'LIFETIME' : 'DAILY',
+          createdTime: campaign.created_time ? new Date(campaign.created_time) : undefined
+        });
+      }
+    }
+
+    for (const insight of metricInsights) {
+      const campaignId = String(insight.campaign_id);
+      const meta = campaignMetaById.get(campaignId) || {};
+      await upsertDailyCampaign(account._id, campaignId, today, {
+        ...meta,
+        name: insight.campaign_name,
+        spend: insight.spend,
+        impressions: insight.impressions,
+        clicks: insight.clicks,
+        messages: 0,
+        costPerMessage: 0
+      });
+    }
+    campaigns = await Campaign.find({ accountId: account._id, date: today }).lean();
+  }
+
   const totalSpend = campaigns.reduce((sum, campaign) => sum + (campaign.spend || 0), 0);
   const totalMessages = campaigns.reduce((sum, campaign) => sum + (campaign.messages || 0), 0);
   const unreadMessages = 0;
@@ -1041,54 +1130,13 @@ async function fetchAccountData(account) {
   const { fbToken } = await getEffectiveSecrets(account);
   if (!fbToken) throw new Error('Thieu Facebook Access Token');
 
-  const acctId = account.adAccountId.startsWith('act_')
-    ? account.adAccountId
-    : `act_${account.adAccountId}`;
-
-  const { items: campaigns } = await fetchAllFbEdge(fbToken, `${acctId}/campaigns`, {
-    fields: 'id,name,status,daily_budget,lifetime_budget,insights.date_preset(today){spend,impressions,clicks,actions,cost_per_action_type}',
-    limit: 500,
-    date_preset: 'today'
-  });
-
-  let totalMessages = 0;
-  const seenCampaignIds = new Set();
-
-  for (const campaign of campaigns) {
-    if (!campaign.id) continue;
-    seenCampaignIds.add(String(campaign.id));
-    const insights = campaign.insights?.data?.[0] || {};
-    const impressions = parseInt(insights.impressions || 0, 10);
-    const clicks = parseInt(insights.clicks || 0, 10);
-    const { spend, messages, costPerMessage } = getCampaignMessageStats(campaign);
-
-    const isLifetime = !!campaign.lifetime_budget && parseFloat(campaign.lifetime_budget) > 0;
-    const budgetType = isLifetime ? 'LIFETIME' : 'DAILY';
-    const dailyBudget = parseFloat(campaign.daily_budget || 0); // Removed division by 100 to match earlier code logic if it was in VND, or let's keep it as is if it was doing / 100. Wait, FB API in VND usually requires no division. The original code had / 100.
-    const lifetimeBudget = parseFloat(campaign.lifetime_budget || 0);
-
-    totalMessages += messages;
-
-    await upsertDailyCampaign(account._id, campaign.id, today, {
-      name: campaign.name,
-      status: campaign.status,
-      dailyBudget: isLifetime ? 0 : dailyBudget,
-      lifetimeBudget: isLifetime ? lifetimeBudget : 0,
-      budgetType,
-      spend,
-      impressions,
-      clicks,
-      messages,
-      costPerMessage
-    });
-  }
-
   const todayInsights = await fetchAccountInsightsInRange(account, today, today);
-  let insightTotalSpend = 0;
-  let insightTotalMessages = 0;
+  const seenCampaignIds = new Set();
+  const campaignMetaById = new Map();
+  const metricInsights = [];
+
   for (const insight of todayInsights) {
     if (!insight.campaign_id) continue;
-    seenCampaignIds.add(String(insight.campaign_id));
     const spend = parseFloat(insight.spend || 0);
     const impressions = parseInt(insight.impressions || 0, 10);
     const clicks = parseInt(insight.clicks || 0, 10);
@@ -1099,17 +1147,74 @@ async function fetchAccountData(account) {
       action.action_type === 'omni_initiated_conversation'
     );
     const messages = parseInt(msgAction?.value || 0, 10);
+    if (spend <= 0 && impressions <= 0 && clicks <= 0 && messages <= 0) continue;
+    metricInsights.push({ ...insight, spend, impressions, clicks, messages });
+    seenCampaignIds.add(String(insight.campaign_id));
+  }
+
+  let insightTotalSpend = 0;
+  let insightTotalMessages = 0;
+  const campaignIds = [...seenCampaignIds];
+  for (const chunk of chunkArray(campaignIds, 50)) {
+    const metaResponse = await fbGet(fbToken, '', {
+      ids: chunk.join(','),
+      fields: 'id,name,status,daily_budget,lifetime_budget,created_time'
+    });
+    for (const campaign of Object.values(metaResponse || {})) {
+      if (!campaign?.id) continue;
+      const isLifetime = !!campaign.lifetime_budget && parseFloat(campaign.lifetime_budget) > 0;
+      const dailyBudget = parseFloat(campaign.daily_budget || 0);
+      const lifetimeBudget = parseFloat(campaign.lifetime_budget || 0);
+      campaignMetaById.set(String(campaign.id), {
+        name: campaign.name,
+        status: campaign.status,
+        dailyBudget: isLifetime ? 0 : dailyBudget,
+        lifetimeBudget: isLifetime ? lifetimeBudget : 0,
+        budgetType: isLifetime ? 'LIFETIME' : 'DAILY',
+        createdTime: campaign.created_time ? new Date(campaign.created_time) : undefined
+      });
+    }
+  }
+
+  const campaigns = [];
+  for (const insight of metricInsights) {
+    const campaignId = String(insight.campaign_id);
+    const actions = insight.actions || [];
+    const { spend, impressions, clicks, messages } = insight;
     const costPerMessage = messages > 0 ? spend / messages : 0;
     insightTotalSpend += spend;
     insightTotalMessages += messages;
+    const meta = campaignMetaById.get(campaignId) || {};
 
-    await upsertDailyCampaign(account._id, insight.campaign_id, today, {
+    await upsertDailyCampaign(account._id, campaignId, today, {
+      ...meta,
       name: insight.campaign_name,
       spend,
       impressions,
       clicks,
       messages,
       costPerMessage
+    });
+
+    campaigns.push({
+      id: campaignId,
+      name: insight.campaign_name || meta.name,
+      status: meta.status,
+      daily_budget: meta.dailyBudget,
+      lifetime_budget: meta.lifetimeBudget,
+      created_time: meta.createdTime,
+      spend,
+      messages,
+      clicks,
+      impressions,
+      insights: {
+        data: [{
+          spend,
+          impressions,
+          clicks,
+          actions
+        }]
+      }
     });
   }
 
@@ -1120,20 +1225,14 @@ async function fetchAccountData(account) {
   });
   if (staleCampaignResult.deletedCount) clearCampaignReadCache();
 
-  let unreadMessages = 0;
-  try {
-    const conversations = await fbGet(fbToken, 'me/conversations', {
-      fields: 'unread_count',
-      limit: 50
-    });
-    unreadMessages = (conversations.data || []).reduce((sum, item) => sum + (item.unread_count || 0), 0);
-  } catch { }
+  const totalSpend = insightTotalSpend;
 
-  const totalSpend = insightTotalSpend || campaigns.reduce((sum, campaign) => {
-    return sum + parseFloat(campaign.insights?.data?.[0]?.spend || 0);
-  }, 0);
-
-  return { campaigns, totalSpend, totalMessages: insightTotalMessages || totalMessages, unreadMessages };
+  return {
+    campaigns,
+    totalSpend,
+    totalMessages: insightTotalMessages,
+    unreadMessages: 0
+  };
 }
 
 async function runAutoControl(account) {
@@ -1167,9 +1266,7 @@ async function runAutoControl(account) {
       campaignsToPause = campaigns
         .filter(campaign => campaign.status === 'ACTIVE')
         .map(campaign => {
-          const { spend, messages, costPerMessage } = getCampaignMessageStats(campaign);
-          const clicks = parseInt(campaign.clicks || campaign.insights?.data?.[0]?.clicks || 0, 10);
-          const costPerClick = clicks > 0 ? spend / clicks : 0;
+          const { spend, messages, costPerMessage, clicks, costPerClick } = getCampaignRuleStats(campaign);
           const isLifetime = !!campaign.lifetimeBudget || !!campaign.lifetime_budget && parseFloat(campaign.lifetime_budget) > 0;
           const budgetType = isLifetime ? 'LIFETIME' : 'DAILY';
           const pauseReason = getPauseReason(account.provider, spend, messages, costPerMessage, clicks, costPerClick, config, budgetType);
@@ -1219,7 +1316,15 @@ async function runAutoControl(account) {
 
     if (campaignsToPause.length > 0) {
       for (const item of campaignsToPause) {
+        const campaignGraphId = item.campaign.id || item.campaign.campaignId;
         if (isShopee) {
+          await fbPost(fbToken, campaignGraphId, { status: 'PAUSED' });
+          await Campaign.findOneAndUpdate(
+            { accountId: account._id, campaignId: campaignGraphId, date: todayStr() },
+            { $set: { status: 'PAUSED', updatedAt: new Date() } },
+            { new: true }
+          );
+          clearCampaignReadCache();
           await addLog(
             account._id,
             account.name,
@@ -1230,7 +1335,7 @@ async function runAutoControl(account) {
         }
 
         try {
-          await fbPost(fbToken, item.campaign.id, {
+          await fbPost(fbToken, campaignGraphId, {
             status: 'PAUSED',
             budget_sharing_enabled: false,
             asset_based_budget_enabled: false
@@ -1238,7 +1343,7 @@ async function runAutoControl(account) {
         } catch (e) {
           // If budget fields fail, try simple status update
           if (e.message.includes('budget_sharing_enabled') || e.message.includes('asset_budget_sharing_enabled')) {
-            await fbPost(fbToken, item.campaign.id, { status: 'PAUSED' });
+            await fbPost(fbToken, campaignGraphId, { status: 'PAUSED' });
           } else {
             throw e;
           }
@@ -1265,6 +1370,7 @@ async function runAutoControl(account) {
 
     if (error.transient) {
       if (error.rateLimited) {
+        markAccountRateLimited(account._id);
         await Account.findByIdAndUpdate(account._id, {
           lastChecked: new Date(),
           status: 'connected'
@@ -1521,6 +1627,7 @@ async function runAutoControlSafely(account, source = 'auto') {
   const accountId = String(account._id);
   if (!isMongoReady()) return;
   if (accountRuns[accountId]) return;
+  if (getAccountRateLimitDelayMs(accountId) > 0) return;
 
   accountRuns[accountId] = true;
   try {
@@ -1563,10 +1670,15 @@ async function startAccountScheduler(account) {
 async function syncTodayCampaignSpendForAccount(account) {
   const accountId = String(account._id);
   if (!isMongoReady() || accountRuns[accountId]) return { skipped: true };
+  if (getAccountRateLimitDelayMs(accountId) > 0) return { skipped: true, rateLimitedCooldown: true };
 
   accountRuns[accountId] = true;
   try {
-    await fetchAccountData(account);
+    if (account.provider === 'shopee') {
+      await fetchShopeeAccountData(account);
+    } else {
+      await fetchAccountData(account);
+    }
     await Account.findByIdAndUpdate(account._id, {
       lastChecked: new Date(),
       status: 'connected'
@@ -1577,6 +1689,7 @@ async function syncTodayCampaignSpendForAccount(account) {
 
     if (error.transient) {
       if (error.rateLimited) {
+        markAccountRateLimited(account._id);
         await Account.findByIdAndUpdate(account._id, {
           lastChecked: new Date(),
           status: 'connected'
@@ -1599,7 +1712,12 @@ async function syncTodayCampaignSpendAllAccounts(source = 'timer') {
 
   todayCampaignSpendSyncRunning = true;
   try {
-    const accounts = await Account.find(buildAccountProviderFilter('facebook'));
+    const accounts = await Account.find({
+      $or: [
+        buildAccountProviderFilter('facebook'),
+        buildAccountProviderFilter('shopee')
+      ]
+    });
     let synced = 0;
     let skipped = 0;
     let failed = 0;
@@ -1625,7 +1743,7 @@ async function syncTodayCampaignSpendAllAccounts(source = 'timer') {
 function startTodayCampaignSpendSync() {
   if (todayCampaignSpendSyncTimer) clearInterval(todayCampaignSpendSyncTimer);
   console.log(`Today campaign spend sync scheduled every ${Math.round(TODAY_CAMPAIGN_SYNC_INTERVAL_MS / 1000)}s`);
-  setTimeout(() => syncTodayCampaignSpendAllAccounts('startup'), 5000);
+  setTimeout(() => syncTodayCampaignSpendAllAccounts('startup'), Math.min(TODAY_CAMPAIGN_SYNC_INTERVAL_MS, 5 * 60 * 1000));
   todayCampaignSpendSyncTimer = setInterval(() => {
     syncTodayCampaignSpendAllAccounts('timer');
   }, TODAY_CAMPAIGN_SYNC_INTERVAL_MS);
@@ -1705,7 +1823,8 @@ app.get('/api/stats', async (req, res) => {
             }
           },
           totalSpend: { $sum: '$spend' },
-          totalMessages: { $sum: '$messages' }
+          totalMessages: { $sum: '$messages' },
+          totalClicks: { $sum: '$clicks' }
         }
       },
       {
@@ -1715,6 +1834,7 @@ app.get('/api/stats', async (req, res) => {
           pausedCount: 1,
           totalSpend: 1,
           totalMessages: 1,
+          totalClicks: 1,
           avgCPM: {
             $cond: [{ $gt: ['$totalMessages', 0] }, { $divide: ['$totalSpend', '$totalMessages'] }, 0]
           }
@@ -1743,6 +1863,7 @@ app.get('/api/stats', async (req, res) => {
       pausedCount: campaignTotals.pausedCount || 0,
       totalSpend: campaignTotals.totalSpend || 0,
       totalMessages: campaignTotals.totalMessages || 0,
+      totalClicks: campaignTotals.totalClicks || 0,
       avgCPM: campaignTotals.avgCPM || 0,
       totalOrders,
       ordersError,
@@ -1776,13 +1897,13 @@ app.get('/api/config', async (req, res) => {
       dailyHighCostPerMessageLimit: config?.dailyHighCostPerMessageLimit || 20000,
       dailyHighCostSpendLimit: config?.dailyHighCostSpendLimit || 50000,
       dailyClickLimit: config?.dailyClickLimit || 0,
-      dailyCpcLimit: config?.dailyCpcLimit || 500,
+      dailyCpcLimit: config?.dailyCpcLimit || 600,
 
       lifetimeZeroMessageSpendLimit: config?.lifetimeZeroMessageSpendLimit || 25000,
       lifetimeHighCostPerMessageLimit: config?.lifetimeHighCostPerMessageLimit || 20000,
       lifetimeHighCostSpendLimit: config?.lifetimeHighCostSpendLimit || 50000,
       lifetimeClickLimit: config?.lifetimeClickLimit || 0,
-      lifetimeCpcLimit: config?.lifetimeCpcLimit || 500
+      lifetimeCpcLimit: config?.lifetimeCpcLimit || 600
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -2510,6 +2631,70 @@ app.post('/api/campaigns/:campaignId/toggle', async (req, res) => {
   }
 });
 
+app.post('/api/campaigns/:campaignId/rename', async (req, res) => {
+  try {
+    const { accountId } = req.body;
+    const date = normalizeCampaignDate(req.body.date);
+    const name = String(req.body.name || '').trim().toUpperCase();
+    if (!name) return res.status(400).json({ error: 'Ten campaign khong duoc de trong' });
+    if (name.length > 400) return res.status(400).json({ error: 'Ten campaign qua dai' });
+
+    const account = await Account.findById(accountId);
+    if (!account) return res.status(404).json({ error: 'Account not found' });
+
+    const { fbToken } = await getEffectiveSecrets(account);
+    if (!fbToken) return res.status(400).json({ error: 'Thieu Facebook Access Token' });
+
+    await fbPost(fbToken, req.params.campaignId, { name });
+    await Campaign.findOneAndUpdate(
+      { accountId, campaignId: req.params.campaignId, date },
+      { $set: { name, updatedAt: new Date() } },
+      { new: true }
+    );
+    clearCampaignReadCache();
+
+    await addLog(account._id, account.name, 'success', `Doi ten camp ${req.params.campaignId}: ${name}`);
+    res.json({ ok: true, name });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post('/api/campaigns/:campaignId/budget', async (req, res) => {
+  try {
+    const { accountId } = req.body;
+    const date = normalizeCampaignDate(req.body.date);
+    const budget = Math.round(Number(req.body.budget || 0));
+    if (!Number.isFinite(budget) || budget <= 0) return res.status(400).json({ error: 'Ngan sach khong hop le' });
+
+    const account = await Account.findById(accountId);
+    if (!account) return res.status(404).json({ error: 'Account not found' });
+
+    const { fbToken } = await getEffectiveSecrets(account);
+    if (!fbToken) return res.status(400).json({ error: 'Thieu Facebook Access Token' });
+
+    const campaign = await Campaign.findOne({ accountId, campaignId: req.params.campaignId, date }).lean();
+    const isLifetime = String(campaign?.budgetType || '').toUpperCase() === 'LIFETIME' || Number(campaign?.lifetimeBudget || 0) > 0;
+    const field = isLifetime ? 'lifetime_budget' : 'daily_budget';
+    await fbPost(fbToken, req.params.campaignId, { [field]: budget });
+
+    const update = isLifetime
+      ? { lifetimeBudget: budget, dailyBudget: 0, budgetType: 'LIFETIME', updatedAt: new Date() }
+      : { dailyBudget: budget, lifetimeBudget: 0, budgetType: 'DAILY', updatedAt: new Date() };
+    await Campaign.findOneAndUpdate(
+      { accountId, campaignId: req.params.campaignId, date },
+      { $set: update },
+      { new: true }
+    );
+    clearCampaignReadCache();
+
+    await addLog(account._id, account.name, 'success', `Doi ngan sach camp ${req.params.campaignId}: ${budget.toLocaleString()}d`);
+    res.json({ ok: true, budget, budgetType: update.budgetType });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
 async function processCampaignDuplicateExactRequest(body = {}, onProgress = null) {
   const provider = normalizeProvider(body.provider);
   const date = normalizeCampaignDate(body.date);
@@ -2725,6 +2910,7 @@ app.post('/api/campaigns/create-from-posts', async (req, res) => {
     const selectedPageId = String(req.body.pageId || '').trim();
     const campaignPrefix = String(req.body.campaignPrefix || '').trim();
     const adNamePrefix = String(req.body.adNamePrefix || DEFAULT_AD_NAME_PREFIX).trim() || DEFAULT_AD_NAME_PREFIX;
+    const adNameStatus = normalizeAdNameStatus(req.body.adNameStatus);
 
     if (!accountId) return res.status(400).json({ error: 'Thieu tai khoan quang cao' });
     if (!campaignItems.length) return res.status(400).json({ error: 'Chua co ma san pham nao' });
@@ -2809,7 +2995,7 @@ app.post('/api/campaigns/create-from-posts', async (req, res) => {
           return { error: { code, lookupTerm, error: 'Khong xac dinh duoc Page ID cua bai viet de tao camp luot mua qua tin nhan' } };
         }
 
-        const adName = buildAdName(cleanCode, adNamePrefix);
+        const adName = buildAdName(cleanCode, adNamePrefix, adNameStatus);
         const finalAdName = isShopee ? baseName : adName;
         let campaign = await fbPost(fbToken, `${acctId}/campaigns`, {
           name: baseName,
@@ -3003,7 +3189,13 @@ app.get('/api/accounts/:id/campaigns', async (req, res) => {
     }
     const match = {
       accountId: new mongoose.Types.ObjectId(req.params.id),
-      date: { $gte: fDate, $lte: tDate }
+      date: { $gte: fDate, $lte: tDate },
+      $or: [
+        { spend: { $gt: 0 } },
+        { impressions: { $gt: 0 } },
+        { clicks: { $gt: 0 } },
+        { messages: { $gt: 0 } }
+      ]
     };
 
     const campaigns = await Campaign.aggregate([
@@ -3017,6 +3209,7 @@ app.get('/api/accounts/:id/campaigns', async (req, res) => {
           status: { $last: '$status' },
           dailyBudget: { $last: '$dailyBudget' },
           lifetimeBudget: { $last: '$lifetimeBudget' },
+          createdTime: { $last: '$createdTime' },
           spend: { $sum: '$spend' },
           messages: { $sum: '$messages' },
           clicks: { $sum: '$clicks' },
@@ -3032,6 +3225,7 @@ app.get('/api/accounts/:id/campaigns', async (req, res) => {
           status: 1,
           dailyBudget: 1,
           lifetimeBudget: 1,
+          createdTime: 1,
           spend: 1,
           messages: 1,
           clicks: 1,
@@ -3061,7 +3255,15 @@ app.get('/api/campaigns/today', async (req, res) => {
     const cached = getReadCache(cacheKey);
     if (cached) return res.json(cached);
 
-    let match = { date: { $gte: fDate, $lte: tDate } };
+    let match = {
+      date: { $gte: fDate, $lte: tDate },
+      $or: [
+        { spend: { $gt: 0 } },
+        { impressions: { $gt: 0 } },
+        { clicks: { $gt: 0 } },
+        { messages: { $gt: 0 } }
+      ]
+    };
     if (provider) {
       const accountIds = (await Account.find(buildAccountProviderFilter(provider)).select('_id')).map(a => a._id);
       match.accountId = { $in: accountIds };
@@ -3079,6 +3281,7 @@ app.get('/api/campaigns/today', async (req, res) => {
           status: { $last: '$status' },
           dailyBudget: { $last: '$dailyBudget' },
           lifetimeBudget: { $last: '$lifetimeBudget' },
+          createdTime: { $last: '$createdTime' },
           spend: { $sum: '$spend' },
           messages: { $sum: '$messages' },
           clicks: { $sum: '$clicks' },
@@ -3108,6 +3311,7 @@ app.get('/api/campaigns/today', async (req, res) => {
           status: 1,
           dailyBudget: 1,
           lifetimeBudget: 1,
+          createdTime: 1,
           spend: 1,
           messages: 1,
           clicks: 1,
@@ -3307,19 +3511,30 @@ async function runSyncHistoryJob(jobId, { fromDate, toDate, provider, accountId 
 
 async function processCampaignSyncHistoryJob(data = {}, onProgress = null) {
   const { fromDate, toDate, provider, accountId } = data;
+  const normalizedProvider = normalizeProvider(provider);
   const filter = {
-    _id: accountId,
-    ...(provider ? buildAccountProviderFilter(provider) : {})
+    ...(normalizedProvider ? buildAccountProviderFilter(normalizedProvider) : {})
   };
-  const account = await Account.findOne(filter);
-  if (!account) throw new Error('Khong tim thay tai khoan can dong bo');
-  if (account.provider === 'shopee') throw new Error('Shopee khong can dong bo Meta insights');
+  if (accountId) {
+    if (!mongoose.Types.ObjectId.isValid(accountId)) {
+      throw new Error('Tai khoan dong bo khong hop le');
+    }
+    filter._id = accountId;
+  }
+  const accounts = await Account.find(filter).sort('name');
+  if (!accounts.length) throw new Error('Khong tim thay tai khoan can dong bo');
+  if (accounts.some(account => account.provider === 'shopee')) {
+    throw new Error('Shopee khong can dong bo Meta insights');
+  }
 
   const dates = assertPastCampaignSyncRange(fromDate, toDate);
+  const totalSteps = Math.max(1, accounts.length * dates.length);
   const baseProgress = {
     state: 'active',
-    accountId: String(account._id),
-    accountName: account.name,
+    accountId: accountId ? String(accounts[0]._id) : '',
+    accountName: accountId ? accounts[0].name : 'Tat ca tai khoan',
+    totalAccounts: accounts.length,
+    completedAccounts: 0,
     fromDate,
     toDate,
     totalDays: dates.length,
@@ -3335,38 +3550,48 @@ async function processCampaignSyncHistoryJob(data = {}, onProgress = null) {
 
   let syncedRows = 0;
   const errors = [];
+  let completedSteps = 0;
 
-  for (let index = 0; index < dates.length; index += 1) {
-    const dateKey = dates[index];
-    if (onProgress) {
-      await onProgress({
-        ...baseProgress,
-        syncedRows,
-        errors,
-        currentDay: dateKey,
-        completedDays: index,
-        percent: Math.round((index / dates.length) * 100)
-      });
-    }
+  for (let accountIndex = 0; accountIndex < accounts.length; accountIndex += 1) {
+    const account = accounts[accountIndex];
+    for (let index = 0; index < dates.length; index += 1) {
+      const dateKey = dates[index];
+      if (onProgress) {
+        await onProgress({
+          ...baseProgress,
+          accountId: String(account._id),
+          accountName: account.name,
+          completedAccounts: accountIndex,
+          syncedRows,
+          errors,
+          currentDay: dateKey,
+          completedDays: index,
+          percent: Math.round((completedSteps / totalSteps) * 100)
+        });
+      }
 
-    try {
-      const count = await syncAccountHistoricalData(account, dateKey, dateKey, { prune: true });
-      syncedRows += count;
-      await addLog(account._id, account.name, 'success', `Dong bo ngay ${dateKey}: ${count} camp`);
-    } catch (error) {
-      errors.push({ date: dateKey, error: error.message });
-      await addLog(account._id, account.name, 'error', `Loi dong bo ngay ${dateKey}: ${error.message}`);
-    }
+      try {
+        const count = await syncAccountHistoricalData(account, dateKey, dateKey, { prune: true });
+        syncedRows += count;
+        await addLog(account._id, account.name, 'success', `Dong bo ngay ${dateKey}: ${count} camp`);
+      } catch (error) {
+        errors.push({ accountId: String(account._id), accountName: account.name, date: dateKey, error: error.message });
+        await addLog(account._id, account.name, 'error', `Loi dong bo ngay ${dateKey}: ${error.message}`);
+      }
 
-    if (index < dates.length - 1 && CAMPAIGN_SYNC_DAY_DELAY_MS > 0) {
-      await sleep(CAMPAIGN_SYNC_DAY_DELAY_MS);
+      completedSteps += 1;
+      if (completedSteps < totalSteps && CAMPAIGN_SYNC_DAY_DELAY_MS > 0) {
+        await sleep(CAMPAIGN_SYNC_DAY_DELAY_MS);
+      }
     }
   }
 
   const result = {
     state: errors.length ? 'completed_with_errors' : 'completed',
-    accountId: String(account._id),
-    accountName: account.name,
+    accountId: accountId ? String(accounts[0]._id) : '',
+    accountName: accountId ? accounts[0].name : 'Tat ca tai khoan',
+    totalAccounts: accounts.length,
+    completedAccounts: accounts.length,
     fromDate,
     toDate,
     totalDays: dates.length,
@@ -3440,8 +3665,8 @@ app.post('/api/campaigns/sync-history', async (req, res) => {
     if (!fromDate || !toDate) {
       return res.status(400).json({ error: 'Thieu fromDate hoac toDate' });
     }
-    if (!accountId || !mongoose.Types.ObjectId.isValid(accountId)) {
-      return res.status(400).json({ error: 'Chon 1 tai khoan truoc khi dong bo' });
+    if (accountId && !mongoose.Types.ObjectId.isValid(accountId)) {
+      return res.status(400).json({ error: 'Tai khoan dong bo khong hop le' });
     }
 
     const dates = assertPastCampaignSyncRange(fromDate, toDate);
@@ -3449,9 +3674,9 @@ app.post('/api/campaigns/sync-history', async (req, res) => {
       fromDate,
       toDate,
       provider: normalizeProvider(provider),
-      accountId,
       totalDays: dates.length
     };
+    if (accountId) payload.accountId = accountId;
 
     if (campaignSyncQueue && req.body?.queue === true) {
       const job = await campaignSyncQueue.add('sync-history', payload);
@@ -3492,6 +3717,8 @@ app.get('/api/campaigns/sync-history/:jobId', async (req, res) => {
       state: failedJob ? 'failed' : (returnvalue.state || progress.state || state),
       accountId: progress.accountId || returnvalue.accountId || job.data.accountId,
       accountName: progress.accountName || returnvalue.accountName || '',
+      totalAccounts: progress.totalAccounts || returnvalue.totalAccounts || 0,
+      completedAccounts: progress.completedAccounts || returnvalue.completedAccounts || 0,
       fromDate: progress.fromDate || returnvalue.fromDate || job.data.fromDate,
       toDate: progress.toDate || returnvalue.toDate || job.data.toDate,
       totalDays: progress.totalDays || returnvalue.totalDays || job.data.totalDays || 0,
@@ -3580,8 +3807,12 @@ app.get('/api/reports/export-spending', async (req, res) => {
 
 app.get('/api/logs', async (req, res) => {
   try {
-    const { accountId, limit = 100 } = req.query;
+    const { accountId, provider, limit = 100 } = req.query;
     const query = accountId ? { accountId } : {};
+    if (!accountId && provider) {
+      const accountIds = (await Account.find(buildAccountProviderFilter(provider)).select('_id').lean()).map(account => account._id);
+      query.accountId = { $in: accountIds };
+    }
     const safeLimit = parseBoundedInt(limit, 100, 1, 500);
     const logs = await Log.find(query).sort('-createdAt').limit(safeLimit).lean();
     res.json(logs);
@@ -3592,8 +3823,12 @@ app.get('/api/logs', async (req, res) => {
 
 app.delete('/api/logs', async (req, res) => {
   try {
-    const { accountId } = req.query;
+    const { accountId, provider } = req.query;
     const query = accountId ? { accountId } : {};
+    if (!accountId && provider) {
+      const accountIds = (await Account.find(buildAccountProviderFilter(provider)).select('_id').lean()).map(account => account._id);
+      query.accountId = { $in: accountIds };
+    }
     await Log.deleteMany(query);
     res.json({ ok: true });
   } catch (error) {

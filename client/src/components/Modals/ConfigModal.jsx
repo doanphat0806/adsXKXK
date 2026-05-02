@@ -17,7 +17,7 @@ export default function ConfigModal() {
     dailyZero: 25000, dailyHighCost: 20000, dailyHighSpend: 50000,
     lifetimeZero: 25000, lifetimeHighCost: 20000, lifetimeHighSpend: 50000,
     dailyClickLimit: 0, lifetimeClickLimit: 0,
-    dailyCpcLimit: 500, lifetimeCpcLimit: 500
+    dailyCpcLimit: 600, lifetimeCpcLimit: 600
   });
 
   useEffect(() => {
@@ -38,8 +38,8 @@ export default function ConfigModal() {
         lifetimeHighSpend: appConfig.lifetimeHighCostSpendLimit || 50000,
         dailyClickLimit: appConfig.dailyClickLimit || 0,
         lifetimeClickLimit: appConfig.lifetimeClickLimit || 0,
-        dailyCpcLimit: appConfig.dailyCpcLimit || 500,
-        lifetimeCpcLimit: appConfig.lifetimeCpcLimit || 500
+        dailyCpcLimit: appConfig.dailyCpcLimit || 600,
+        lifetimeCpcLimit: appConfig.lifetimeCpcLimit || 600
       });
     }
   }, [appConfig]);
@@ -210,7 +210,7 @@ export default function ConfigModal() {
               <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '10px' }}>THEO NGÀY</div>
               {isShopee ? (
                 <>
-                  <div className="form-group"><label>Chi phí tối đa/ click (ngày)</label><input type="number" min="0" placeholder="500" value={autoLimits.dailyCpcLimit} onChange={e => setAutoLimits({ ...autoLimits, dailyCpcLimit: e.target.value })} /></div>
+                  <div className="form-group"><label>Chi phí tối đa/ click (ngày)</label><input type="number" min="0" placeholder="600" value={autoLimits.dailyCpcLimit} onChange={e => setAutoLimits({ ...autoLimits, dailyCpcLimit: e.target.value })} /></div>
                   <div className="form-group"><label>Số click tối đa/ngày</label><input type="number" min="0" placeholder="0" value={autoLimits.dailyClickLimit} onChange={e => setAutoLimits({ ...autoLimits, dailyClickLimit: e.target.value })} /></div>
                 </>
               ) : (
@@ -225,7 +225,7 @@ export default function ConfigModal() {
               <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '10px' }}>TRỌN ĐỜI</div>
               {isShopee ? (
                 <>
-                  <div className="form-group"><label>Chi phí tối đa/ click (trọn đời)</label><input type="number" min="0" placeholder="500" value={autoLimits.lifetimeCpcLimit} onChange={e => setAutoLimits({ ...autoLimits, lifetimeCpcLimit: e.target.value })} /></div>
+                  <div className="form-group"><label>Chi phí tối đa/ click (trọn đời)</label><input type="number" min="0" placeholder="600" value={autoLimits.lifetimeCpcLimit} onChange={e => setAutoLimits({ ...autoLimits, lifetimeCpcLimit: e.target.value })} /></div>
                   <div className="form-group"><label>Số click tối đa trọn đời</label><input type="number" min="0" placeholder="0" value={autoLimits.lifetimeClickLimit} onChange={e => setAutoLimits({ ...autoLimits, lifetimeClickLimit: e.target.value })} /></div>
                 </>
               ) : (

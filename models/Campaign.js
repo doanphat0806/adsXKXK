@@ -8,6 +8,7 @@ const CampaignSchema = new mongoose.Schema({
   dailyBudget: { type: Number, default: 0 },
   lifetimeBudget: { type: Number, default: 0 },
   budgetType: { type: String, default: 'DAILY' },
+  createdTime: { type: Date },
   spend: { type: Number, default: 0 },
   impressions: { type: Number, default: 0 },
   clicks: { type: Number, default: 0 },

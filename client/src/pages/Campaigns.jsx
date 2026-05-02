@@ -83,27 +83,27 @@ export default function Campaigns() {
   };
 
   const handleSyncHistoryQueued = async () => {
-    if (!filterAcc) {
-      toast.error('Chon 1 tai khoan truoc khi dong bo de tranh treo web');
-      return;
-    }
     if (syncToDate >= todayString()) {
       toast.error('Chi dong bo thu cong cac ngay truoc hom nay. Du lieu hom nay se duoc chot tu dong cuoi ngay.');
       return;
     }
 
-    const accountName = allAccounts.find(account => account._id === filterAcc)?.name || filterAcc;
-    if (!window.confirm(`Dong bo du lieu da chot tai khoan ${accountName} tu ${syncFromDate} den ${syncToDate}?`)) return;
+    const accountName = filterAcc
+      ? allAccounts.find(account => account._id === filterAcc)?.name || filterAcc
+      : `tat ca tai khoan ${provider === 'shopee' ? 'Shopee' : 'Facebook'}`;
+    if (!window.confirm(`Dong bo du lieu da chot ${accountName} tu ${syncFromDate} den ${syncToDate}?`)) return;
 
     setSyncing(true);
     setSyncJob(null);
     try {
-      const res = await api('POST', '/campaigns/sync-history', {
+      const payload = {
         fromDate: syncFromDate,
         toDate: syncToDate,
         provider,
-        accountId: filterAcc
-      });
+        queue: true
+      };
+      if (filterAcc) payload.accountId = filterAcc;
+      const res = await api('POST', '/campaigns/sync-history', payload);
 
       if (!res.jobId) {
         setSyncJob(res);
@@ -134,7 +134,8 @@ export default function Campaigns() {
         toast.warn(`Dong bo xong, co ${finalStatus.job.errors.length} ngay loi`);
         loadCampaigns(true);
       } else {
-        toast.success(`Dong bo xong ${finalStatus.job.syncedRows || 0} camp`);
+        const accountText = finalStatus.job.totalAccounts ? ` / ${finalStatus.job.totalAccounts} tai khoan` : '';
+        toast.success(`Dong bo xong ${finalStatus.job.syncedRows || 0} camp${accountText}`);
         loadCampaigns(true);
       }
     } catch (error) {
@@ -152,10 +153,8 @@ export default function Campaigns() {
   };
 
   const syncIncludesTodayOrFuture = syncToDate >= todayString();
-  const syncDisabled = syncing || provider === 'shopee' || !filterAcc || syncIncludesTodayOrFuture;
-  const syncButtonTitle = !filterAcc
-    ? 'Chon 1 tai khoan truoc khi dong bo'
-    : syncIncludesTodayOrFuture
+  const syncDisabled = syncing || provider === 'shopee' || syncIncludesTodayOrFuture;
+  const syncButtonTitle = syncIncludesTodayOrFuture
       ? 'Chi dong bo thu cong cac ngay truoc hom nay'
       : '';
 
@@ -268,8 +267,15 @@ export default function Campaigns() {
         {syncJob && (
           <div style={{ padding: '0 18px 16px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: 'var(--muted2)', marginBottom: '6px' }}>
-              <span>{syncJob.message || 'Dang dong bo'}{syncJob.currentDay ? ` - ${syncJob.currentDay}` : ''}</span>
-              <span>{syncJob.completedDays || 0}/{syncJob.totalDays || 0} ngay - {syncJob.percent || 0}%</span>
+              <span>
+                {syncJob.message || 'Dang dong bo'}
+                {syncJob.accountName ? ` - ${syncJob.accountName}` : ''}
+                {syncJob.currentDay ? ` - ${syncJob.currentDay}` : ''}
+              </span>
+              <span>
+                {syncJob.totalAccounts ? `${syncJob.completedAccounts || 0}/${syncJob.totalAccounts} TK - ` : ''}
+                {syncJob.completedDays || 0}/{syncJob.totalDays || 0} ngay - {syncJob.percent || 0}%
+              </span>
             </div>
             <div className="pbar">
               <div className="pbar-fill" style={{ width: `${syncJob.percent || 0}%`, background: syncJob.state === 'failed' ? 'var(--r)' : 'var(--g)' }}></div>

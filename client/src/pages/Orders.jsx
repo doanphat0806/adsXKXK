@@ -29,7 +29,7 @@ const asObject = (value) => (
 const formatCreatedAt = (value) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '-';
-  return date.toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
+  return date.toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh', hour12: false });
 };
 
 // Trạng thái → badge class

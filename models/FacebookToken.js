@@ -1,7 +1,9 @@
+const { tenantPlugin } = require('../middleware/tenant');
 const mongoose = require('mongoose');
 
 const FacebookTokenSchema = new mongoose.Schema({
-  key: { type: String, required: true, unique: true, default: 'facebook_user' },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  key: { type: String, required: true, default: 'facebook_user' },
   appId: { type: String, default: '' },
   appSecret: { type: String, default: '' },
   token: { type: String, required: true },
@@ -13,4 +15,5 @@ const FacebookTokenSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
+FacebookTokenSchema.plugin(tenantPlugin);
 module.exports = mongoose.model('FacebookToken', FacebookTokenSchema);

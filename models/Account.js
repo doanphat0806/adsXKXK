@@ -1,6 +1,8 @@
+const { tenantPlugin } = require('../middleware/tenant');
 const mongoose = require('mongoose');
 
 const AccountSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   name: { type: String, required: true },
   provider: { type: String, enum: ['facebook', 'shopee'], default: 'facebook' },
   fbToken: { type: String, default: '' },
@@ -20,4 +22,5 @@ AccountSchema.index({ provider: 1, status: 1 }, { name: 'account_provider_status
 AccountSchema.index({ provider: 1, adAccountId: 1 }, { name: 'account_provider_adAccountId' });
 AccountSchema.index({ autoEnabled: 1 }, { name: 'account_autoEnabled' });
 
+AccountSchema.plugin(tenantPlugin);
 module.exports = mongoose.model('Account', AccountSchema);

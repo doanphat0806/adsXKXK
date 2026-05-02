@@ -48,6 +48,11 @@ export async function api(method, path, body = null, options = {}) {
     signal: controller.signal
   };
 
+  const token = localStorage.getItem('jwt_token');
+  if (token) {
+    opts.headers['Authorization'] = `Bearer ${token}`;
+  }
+
   if (body !== null && body !== undefined) opts.body = JSON.stringify(body);
 
   let res;

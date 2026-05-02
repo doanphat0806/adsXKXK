@@ -9,7 +9,8 @@ export const useAppContext = () => useContext(AppContext);
 const AUTO_REFRESH_MS = 60000;
 
 export const AppProvider = ({ children }) => {
-  const [isAuthenticated, setIsAuthenticated] = useState(() => localStorage.getItem('adsctrl-auth') === '1');
+  const [isAuthenticated, setIsAuthenticated] = useState(() => !!localStorage.getItem('jwt_token'));
+  const [username, setUsername] = useState(() => localStorage.getItem('adsctrl-username') || '');
   const [provider, setProvider] = useState(() => localStorage.getItem('adsctrl-provider') || 'facebook');
   const [appConfig, setAppConfig] = useState({});
   const [stats, setStats] = useState({});
@@ -23,48 +24,24 @@ export const AppProvider = ({ children }) => {
   const openModal = (type, data = null) => setModalState({ type, data });
   const closeModal = () => setModalState({ type: null, data: null });
 
-  const loginFacebook = async (username, password) => {
-    if (username === 'admin' && password === 'admin') {
-      localStorage.setItem('adsctrl-auth', '1');
-      localStorage.setItem('adsctrl-provider', 'facebook');
-      setIsAuthenticated(true);
-      setProvider('facebook');
-      toast.success('Đăng nhập Facebook thành công');
-      return true;
-    }
-    toast.error('Sai tài khoản hoặc mật khẩu Facebook');
-    return false;
-  };
-
-  const loginShopee = async (username, password) => {
-    if (username === 'admin1' && password === 'admin') {
-      localStorage.setItem('adsctrl-auth', '1');
-      localStorage.setItem('adsctrl-provider', 'shopee');
-      setIsAuthenticated(true);
-      setProvider('shopee');
-      toast.success('Đăng nhập Shopee thành công');
-      return true;
-    }
-    toast.error('Sai tài khoản hoặc mật khẩu Shopee');
-    return false;
-  };
-
-  const login = async (username, password, type = 'facebook') => {
-    if (type === 'facebook') {
-      return loginFacebook(username, password);
-    }
-    if (type === 'shopee') {
-      return loginShopee(username, password);
-    }
-    toast.error('Nhà cung cấp không hợp lệ');
-    return false;
+  const login = (token, user, platform = 'facebook') => {
+    localStorage.setItem('jwt_token', token);
+    localStorage.setItem('adsctrl-username', user);
+    localStorage.setItem('adsctrl-provider', platform);
+    setIsAuthenticated(true);
+    setUsername(user);
+    setProvider(platform);
+    toast.success(`Chào mừng ${user} quay trở lại!`);
   };
 
   const logout = () => {
-    localStorage.removeItem('adsctrl-auth');
+    localStorage.removeItem('jwt_token');
+    localStorage.removeItem('adsctrl-username');
     localStorage.removeItem('adsctrl-provider');
     setIsAuthenticated(false);
+    setUsername('');
     setProvider('facebook');
+    toast.info('Đã đăng xuất');
   };
 
   const loadConfig = useCallback(async () => {

@@ -4,7 +4,7 @@ import { ToastContainer } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 
 import { AppProvider, useAppContext } from './contexts/AppContext';
-import AuthScreen from './components/AuthScreen';
+import Login from './pages/Login';
 import Sidebar from './components/Sidebar';
 import Topbar from './components/Topbar';
 import Dashboard from './pages/Dashboard';
@@ -38,7 +38,7 @@ function AppContent() {
   };
 
   if (!isAuthenticated) {
-    return <AuthScreen />;
+    return <Login />;
   }
 
   return (

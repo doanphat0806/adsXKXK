@@ -1,6 +1,8 @@
+const { tenantPlugin } = require('../middleware/tenant');
 const mongoose = require('mongoose');
 
 const CampaignSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   accountId: { type: mongoose.Schema.Types.ObjectId, ref: 'Account', required: true },
   campaignId: { type: String, required: true },
   name: { type: String },
@@ -31,4 +33,5 @@ CampaignSchema.index({ accountId: 1, date: 1, spend: -1 }, { name: 'campaign_acc
 CampaignSchema.index({ date: 1, campaignId: 1, accountId: 1 }, { name: 'campaign_date_campaign_account' });
 CampaignSchema.index({ accountId: 1, date: 1, campaignId: 1 }, { name: 'campaign_account_date_campaign' });
 
+CampaignSchema.plugin(tenantPlugin);
 module.exports = mongoose.model('Campaign', CampaignSchema);

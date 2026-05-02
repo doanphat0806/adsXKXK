@@ -3,7 +3,7 @@ import { NavLink } from 'react-router-dom';
 import { useAppContext } from '../contexts/AppContext';
 
 export default function Sidebar() {
-  const { stats, allAccounts, openModal, provider } = useAppContext();
+  const { stats, allAccounts, openModal, provider, logout } = useAppContext();
   const showOrders = provider !== 'shopee';
 
   return (
@@ -59,6 +59,13 @@ export default function Sidebar() {
       </div>
 
       <div className="sidebar-footer">
+        <div style={{ padding: '0 12px 12px', borderBottom: '1px solid #ffffff10', marginBottom: '12px' }}>
+          <div style={{ fontSize: '12px', color: 'var(--muted2)', marginBottom: '5px' }}>Đang đăng nhập:</div>
+          <div style={{ fontSize: '14px', fontWeight: 'bold', color: 'var(--primary)' }}>👤 {localStorage.getItem('adsctrl-username') || 'User'}</div>
+          <button className="btn btn-ghost btn-sm" style={{ width: '100%', marginTop: '10px', fontSize: '11px', padding: '4px' }} onClick={logout}>
+            🚪 Đăng xuất
+          </button>
+        </div>
         <div className="global-status">
           <div className={`dot ${stats.connectedAccounts > 0 ? 'on' : ''}`} id="globalDot"></div>
           <span id="globalStatusTxt" style={{ fontSize: '11px', color: 'var(--muted2)' }}>

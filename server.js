@@ -14,11 +14,98 @@ const { parseBoundedInt } = require('./utils/number');
 const app = express();
 const publicDir = path.join(__dirname, 'client', 'dist');
 app.set('trust proxy', 1);
+
 app.use(cors());
 app.use(express.json());
 app.use(express.static(publicDir));
 
+const authRoutes = require('./routes/auth');
+const { authMiddleware } = require('./middleware/auth');
+const { tenantMiddleware } = require('./middleware/tenant');
 
+app.use('/api/auth', authRoutes);
+
+app.use('/api', (req, res, next) => {
+  const publicPaths = ['/facebook/oauth/callback'];
+  if (publicPaths.some(p => req.path.startsWith(p))) {
+    return next();
+  }
+  authMiddleware(req, res, (err) => {
+    if (err) return next(err);
+    tenantMiddleware(req, res, next);
+  });
+});
+
+// ================= FACEBOOK LOGIN =================
+const FB_REDIRECT_URI = 'https://xekoxukashop.id.vn/auth/facebook/callback';
+
+app.get('/auth/facebook', (req, res) => {
+  const url = `https://www.facebook.com/v24.0/dialog/oauth?client_id=${process.env.FB_APP_ID}&redirect_uri=${encodeURIComponent(FB_REDIRECT_URI)}&scope=public_profile,email`;
+
+  return res.redirect(url);
+});
+
+app.get('/auth/facebook/callback', async (req, res) => {
+  const { code, error } = req.query;
+
+  // ❌ user bấm huỷ
+  if (error) {
+    return res.redirect('https://xekoxukashop.id.vn/');
+  }
+
+  // ❌ không có code
+  if (!code) {
+    return res.send("No code");
+  }
+
+  try {
+    // 👉 đổi code -> access_token
+    const tokenRes = await axios.get(
+      'https://graph.facebook.com/v24.0/oauth/access_token',
+      {
+        params: {
+          client_id: process.env.FB_APP_ID,
+          client_secret: process.env.FB_APP_SECRET,
+          redirect_uri: FB_REDIRECT_URI,
+          code
+        }
+      }
+    );
+
+    const access_token = tokenRes.data.access_token;
+
+    // 👉 lấy info user
+    const userRes = await axios.get('https://graph.facebook.com/me', {
+      params: {
+        access_token,
+        fields: 'id,name,email'
+      }
+    });
+
+    const user = userRes.data;
+    console.log("FB USER:", user);
+
+    // 👉 TODO: lưu DB nếu cần
+
+    // ✅ Đăng nhập thành công trên frontend và về lại Dash
+    return res.send(`
+      <script>
+        localStorage.setItem('adsctrl-auth', '1');
+        localStorage.setItem('adsctrl-provider', 'facebook');
+        window.location.href = '/';
+      </script>
+    `);
+
+  } catch (err) {
+    console.error("FB LOGIN ERROR:", err.response?.data || err.message);
+    return res.send(`
+      <script>
+        alert("Lỗi đăng nhập Facebook!");
+        window.location.href = '/';
+      </script>
+    `);
+  }
+});
 // Auto-pause rules time window check (Vietnam time, UTC+7)
 function isWithinAutoRuleTimeWindow(startTime, endTime) {
   const now = new Date();
@@ -46,6 +133,8 @@ const Config = require('./models/Config');
 const FacebookToken = require('./models/FacebookToken');
 const Order = require('./models/Order');
 const FacebookPost = require('./models/FacebookPost');
+const User = require('./models/User');
+const { runAsUser } = require('./middleware/tenant');
 const {
   buildOrderQuery,
   useSheetOrders,
@@ -188,7 +277,11 @@ function clearCampaignReadCache() {
 }
 
 async function getAppConfig() {
-  return Config.findOne({ key: 'app' });
+  let config = await Config.findOne({ key: 'app' });
+  if (!config) {
+    config = await Config.create({ key: 'app' });
+  }
+  return config;
 }
 
 async function getEffectiveSecrets(account) {
@@ -516,10 +609,7 @@ function markAccountRateLimited(accountId) {
 }
 
 function getFacebookOAuthRedirectUri(req) {
-  const configured = String(process.env.FB_OAUTH_REDIRECT_URI || '').trim();
-  if (configured) return configured;
-  const baseUrl = String(process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
-  return `${baseUrl}/api/facebook/oauth/callback`;
+  return 'https://xekoxukashop.id.vn/api/facebook/oauth/callback';
 }
 
 function getFacebookOAuthState(req) {
@@ -546,15 +636,20 @@ function renderOAuthPopupResult(payload) {
   return `<!doctype html>
 <html>
   <head><meta charset="utf-8"><title>Facebook Login</title></head>
-  <body>
+  <body style="font-family: sans-serif; padding: 20px; text-align: center;">
+    <h2>Đang xử lý đăng nhập...</h2>
+    <p>Cửa sổ này sẽ tự động đóng.</p>
     <script>
-      const payload = ${json};
-      if (window.opener) {
-        window.opener.postMessage({ type: 'adsctrl:facebook-oauth', payload }, window.location.origin);
+      try {
+        const payload = ${json};
+        if (window.opener) {
+          window.opener.postMessage({ type: 'adsctrl:facebook-oauth', payload }, '*');
+        }
+        setTimeout(() => window.close(), 500);
+      } catch (e) {
+        document.body.innerHTML += '<p style="color: red;">Lỗi giao tiếp: ' + e.message + '</p>';
       }
-      window.close();
     </script>
-    <p>Facebook login finished. You can close this window.</p>
   </body>
 </html>`;
 }
@@ -1712,25 +1807,31 @@ async function syncTodayCampaignSpendAllAccounts(source = 'timer') {
 
   todayCampaignSpendSyncRunning = true;
   try {
-    const accounts = await Account.find({
-      $or: [
-        buildAccountProviderFilter('facebook'),
-        buildAccountProviderFilter('shopee')
-      ]
-    });
-    let synced = 0;
-    let skipped = 0;
-    let failed = 0;
+    const users = await User.find({});
+    let totalSynced = 0;
+    let totalSkipped = 0;
+    let totalFailed = 0;
 
-    for (const account of accounts) {
-      if (isShuttingDown) break;
-      const result = await syncTodayCampaignSpendForAccount(account);
-      if (result?.ok) synced += 1;
-      else if (result?.skipped) skipped += 1;
-      else failed += 1;
+    for (const user of users) {
+      await runAsUser(user._id, async () => {
+        const accounts = await Account.find({
+          $or: [
+            buildAccountProviderFilter('facebook'),
+            buildAccountProviderFilter('shopee')
+          ]
+        });
+        
+        for (const account of accounts) {
+          if (isShuttingDown) break;
+          const result = await syncTodayCampaignSpendForAccount(account);
+          if (result?.ok) totalSynced += 1;
+          else if (result?.skipped) totalSkipped += 1;
+          else totalFailed += 1;
+        }
+      });
     }
 
-    console.log(`Today campaign spend sync (${source}): synced=${synced}, skipped=${skipped}, failed=${failed}`);
+    console.log(`Today campaign spend sync (${source}): synced=${totalSynced}, skipped=${totalSkipped}, failed=${totalFailed}`);
   } catch (error) {
     if (!isShuttingDown) {
       console.error(`Today campaign spend sync failed: ${error.message}`);
@@ -3650,7 +3751,16 @@ function startFinalSpendCron() {
 
   const task = cron.schedule(FINAL_SPEND_CRON, async () => {
     try {
-      await syncFinalSpendForDate(dateKeyFromVnOffset(-1));
+      const users = await User.find({});
+      for (const user of users) {
+        await runAsUser(user._id, async () => {
+          try {
+            await syncFinalSpendForDate(dateKeyFromVnOffset(-1));
+          } catch (err) {
+            console.error(`Final spend sync failed for user ${user.username}: ${err.message}`);
+          }
+        });
+      }
     } catch (error) {
       console.error(`Final spend cron failed: ${error.message}`);
     }

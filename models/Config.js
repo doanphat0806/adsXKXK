@@ -1,7 +1,9 @@
+const { tenantPlugin } = require('../middleware/tenant');
 const mongoose = require('mongoose');
 
 const ConfigSchema = new mongoose.Schema({
-  key: { type: String, required: true, unique: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  key: { type: String, required: true },
   fbToken: { type: String, default: '' },
   fbTokenExpiresAt: { type: Date },
   fbTokenLastRefreshTime: { type: Date },
@@ -30,4 +32,5 @@ const ConfigSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
+ConfigSchema.plugin(tenantPlugin);
 module.exports = mongoose.model('Config', ConfigSchema);

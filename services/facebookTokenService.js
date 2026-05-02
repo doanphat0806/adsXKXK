@@ -3,6 +3,8 @@ const cron = require('node-cron');
 
 const Config = require('../models/Config');
 const FacebookToken = require('../models/FacebookToken');
+const User = require('../models/User');
+const { runAsUser } = require('../middleware/tenant');
 
 const FACEBOOK_TOKEN_KEY = 'facebook_user';
 const FACEBOOK_TOKEN_REFRESH_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000;
@@ -290,12 +292,23 @@ function startFacebookTokenCron() {
 
   const task = cron.schedule(FACEBOOK_TOKEN_CRON, async () => {
     try {
-      const result = await checkAndRefreshFacebookToken({ source: 'cron' });
-      if (result.skipped) {
-        console.warn(`Facebook token cron skipped: ${result.reason}`);
+      const users = await User.find({});
+      for (const user of users) {
+        await runAsUser(user._id, async () => {
+          try {
+            const result = await checkAndRefreshFacebookToken({ source: 'cron' });
+            if (result.skipped) {
+              console.log(`Facebook token cron skipped for user ${user.username}: ${result.reason}`);
+            } else {
+              console.log(`Facebook token cron success for user ${user.username}`);
+            }
+          } catch (err) {
+            console.error(`Facebook token cron failed for user ${user.username}: ${err.message}`);
+          }
+        });
       }
     } catch (error) {
-      console.error(`Facebook token cron failed: ${error.message}`);
+      console.error(`Facebook token master cron failed: ${error.message}`);
     }
   });
 
